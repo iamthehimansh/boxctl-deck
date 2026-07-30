@@ -93,7 +93,7 @@ final class BoxModel: ObservableObject {
     @Published var loading = false
     @Published var banner: String?
     @Published var log: [String] = []
-    @Published var launchAtLogin = LoginItem.isEnabled
+    @Published var launchAtLogin = false      // refreshed after launch
     @Published var stats = BoxStats()
     @Published var mac = MacStats()
     /// Rolling history for the menu-bar sparkline (newest last).
@@ -140,6 +140,7 @@ final class BoxModel: ObservableObject {
             await refreshStatus()
         }
         await listDir(cwd)
+        launchAtLogin = LoginItem.isEnabled
         startPolling()
     }
 
