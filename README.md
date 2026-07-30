@@ -21,6 +21,21 @@ ln -sf "$PWD/boxctl.sh" ~/.local/bin/boxctl        # or copy the launcher
 cd ../boxdeck && ./make-dmg.sh && open BoxDeck.dmg  # drag to /Applications
 ```
 
+## Configure your box
+
+Nothing is hardcoded — create `~/.config/boxctl/config.json`:
+
+```json
+{
+  "host": "box.example.com",
+  "user": "youruser",
+  "alias": "box",
+  "lan_host": "yourbox.local"
+}
+```
+
+`BOX_HOST` / `BOX_USER` / `BOX_ALIAS` / `BOX_LAN_HOST` env vars override it.
+
 ## Quick use
 
 ```bash

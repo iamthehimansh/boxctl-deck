@@ -16,8 +16,8 @@ boxctl code           # open VS Code Remote-SSH on the box
 | alias | path | when |
 |---|---|---|
 | `box` | **auto** | LAN when reachable, else the domain. Use this normally |
-| `box-lan` | `himansh-raj-MS-7D88.local` direct | force local network (fastest, no cloudflared) |
-| `box-remote` | `ssh.himansh.in` via cloudflared | force this when you're **outside** |
+| `box-lan` | `yourbox.local` direct | force local network (fastest, no cloudflared) |
+| `box-remote` | `box.example.com` via cloudflared | force this when you're **outside** |
 
 `ssh box` decides per-connection with a 1-second probe (`Match … exec` in
 `~/.ssh/config`). Measured: LAN ~0.0 s, remote ~0.3 s to connect.

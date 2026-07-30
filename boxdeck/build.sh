@@ -31,3 +31,13 @@ PLIST
 codesign --force --deep --sign - "$APP" 2>/dev/null || true
 echo "==> built $APP"
 echo "Run it with:  open \"$APP\""
+
+# `./build.sh --install` refreshes /Applications so you never end up running two
+# copies (two copies = two menu-bar icons, and login-at-startup only works
+# reliably for an app in /Applications).
+if [ "$1" = "--install" ]; then
+  rm -rf /Applications/BoxDeck.app
+  cp -R "$APP" /Applications/BoxDeck.app
+  codesign --force --deep --sign - /Applications/BoxDeck.app 2>/dev/null || true
+  echo "==> installed to /Applications/BoxDeck.app"
+fi

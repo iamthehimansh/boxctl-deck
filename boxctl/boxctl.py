@@ -33,9 +33,19 @@ import subprocess
 import sys
 import time
 
-HOST = os.environ.get("BOX_HOST", "ssh.himansh.in")
-USER = os.environ.get("BOX_USER", "himansh-raj")
-ALIAS = os.environ.get("BOX_ALIAS", "box")
+# Site config: env var > ~/.config/boxctl/config.json > placeholder.
+# Keeping the real host/user OUT of the source means this repo can be public.
+def _cfg() -> dict:
+    try:
+        return json.loads((pathlib.Path(os.path.expanduser("~/.config/boxctl/config.json"))).read_text())
+    except Exception:
+        return {}
+
+
+_C = _cfg()
+HOST = os.environ.get("BOX_HOST") or _C.get("host", "box.example.com")
+USER = os.environ.get("BOX_USER") or _C.get("user", "youruser")
+ALIAS = os.environ.get("BOX_ALIAS") or _C.get("alias", "box")
 CLOUDFLARED = shutil.which("cloudflared") or "/opt/homebrew/bin/cloudflared"
 CFG_DIR = pathlib.Path(os.path.expanduser("~/.config/boxctl"))
 KEY = CFG_DIR / "session_key"
@@ -44,7 +54,7 @@ PASSKEY_PUB = CFG_DIR / "passkey.pub"
 SSH_CONFIG = pathlib.Path(os.path.expanduser("~/.ssh/config"))
 TTL_HOURS = int(os.environ.get("BOX_TTL_HOURS", "24"))
 TUNNELS = [(8011, 8011), (11435, 11434)]        # local -> remote
-LAN_HOST_DEFAULT = os.environ.get("BOX_LAN_HOST", "192.168.1.86")
+LAN_HOST_DEFAULT = os.environ.get("BOX_LAN_HOST") or _C.get("lan_host", "")
 SECRETIVE_SOCK = pathlib.Path(os.path.expanduser(
     "~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh"))
 BEGIN, END = "# >>> boxctl managed >>>", "# <<< boxctl managed <<<"

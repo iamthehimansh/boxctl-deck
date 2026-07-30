@@ -81,13 +81,17 @@ struct BoxStatus {
 
 // MARK: - box controller
 
+/// Start in the remote home directory; the real path is discovered on connect so
+/// no username is baked into the source.
+let NSHomeDirectoryOnBox = "~"
+
 @MainActor
 final class BoxModel: ObservableObject {
     @Published var status = BoxStatus()
     /// Loaded from ~/services.json ON THE BOX — add an entry there (or via the +
     /// button / the `box-service` skill) and it appears here automatically.
     @Published var services: [BoxService] = []
-    @Published var cwd = "/home/himansh-raj"
+    @Published var cwd = NSHomeDirectoryOnBox      // resolved on first listing
     @Published var entries: [RemoteFile] = []
     @Published var selected: RemoteFile?
     @Published var loading = false
@@ -351,7 +355,8 @@ final class BoxModel: ObservableObject {
         loading = true
         defer { loading = false }
         // -A: include dotfiles, skip . and ..  |  emit: type<TAB>size<TAB>name
-        let cmd = "cd \(Shell.q(path)) 2>/dev/null && ls -Ap --file-type 2>/dev/null | head -500 | " +
+        let target = path == "~" ? "$HOME" : Shell.q(path)
+        let cmd = "cd \(target) 2>/dev/null && pwd 1>&2 && ls -Ap --file-type 2>/dev/null | head -500 | " +
                   "while IFS= read -r n; do s=$(stat -c%s \"${n%/}\" 2>/dev/null || echo 0); " +
                   "printf '%s\\t%s\\t%s\\n' \"$([ -d \"${n%/}\" ] && echo d || echo f)\" \"$s\" \"${n%/}\"; done"
         let r = await Shell.run(["ssh", "-o", "BatchMode=yes", "box", Shell.q(cmd)], timeout: 45)
@@ -371,7 +376,10 @@ final class BoxModel: ObservableObject {
         entries = out.sorted { a, b in
             a.isDir == b.isDir ? a.name.lowercased() < b.name.lowercased() : a.isDir && !b.isDir
         }
-        cwd = path
+        // the shell prints the resolved directory on stderr, so "~" becomes real
+        let resolved = r.err.split(separator: "\n").first.map(String.init)?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        cwd = resolved.hasPrefix("/") ? resolved : path
     }
 
     func open(_ f: RemoteFile) async {
