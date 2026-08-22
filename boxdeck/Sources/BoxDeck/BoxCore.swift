@@ -317,7 +317,11 @@ final class BoxModel: ObservableObject {
                  Shell.q("systemctl --user is-active \(unit); systemctl --user is-enabled \(unit)")],
                 timeout: 40)
             let lines = r.out.split(separator: "\n").map(String.init)
-            services[i].active = lines.first?.trimmingCharacters(in: .whitespaces) == "active"
+            // Long-running Type=oneshot units remain "activating" until their
+            // command finishes, even though their workload and GPU usage are live.
+            // Present both active and activating as on in the service switch.
+            let state = lines.first?.trimmingCharacters(in: .whitespaces)
+            services[i].active = state == "active" || state == "activating"
             services[i].enabled = lines.count > 1 &&
                 lines[1].trimmingCharacters(in: .whitespaces) == "enabled"
         }

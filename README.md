@@ -7,6 +7,7 @@ tunnels, services and live telemetry.
 |---|---|
 | **[boxctl](boxctl/)** | CLI: auth (Touch ID / TOTP), LAN↔remote routing, tunnels, health, VS Code |
 | **[boxdeck](boxdeck/)** | macOS app: menu-bar live chart, service toggles, remote file browser |
+| **[boxmcp](boxmcp/)** | MCP server: remote shell, files, services, and telemetry for Codex |
 
 BoxDeck drives boxctl — one tunnel keeper, one source of truth.
 
@@ -19,6 +20,10 @@ ln -sf "$PWD/boxctl.sh" ~/.local/bin/boxctl        # or copy the launcher
 
 # App
 cd ../boxdeck && ./make-dmg.sh && open BoxDeck.dmg  # drag to /Applications
+
+# Codex MCP
+cd ../boxmcp && uv sync
+codex mcp add box -- "$PWD/.venv/bin/boxmcp"
 ```
 
 ## Configure your box
