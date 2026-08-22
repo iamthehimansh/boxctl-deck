@@ -28,6 +28,12 @@ class SSHTests(unittest.TestCase):
         ssh.assert_not_called()
 
     @patch("boxmcp.server._ssh")
+    def test_service_status_accepts_systemctl_code_three(self, ssh):
+        ssh.return_value = {"ok": False, "exit_code": 3, "stdout": "inactive\n"}
+        result = server.box_service("example", "status")
+        self.assertTrue(result["ok"])
+
+    @patch("boxmcp.server._ssh")
     def test_write_enforces_size_limit(self, ssh):
         with patch.object(server, "MAX_WRITE_BYTES", 3):
             result = server.box_write("/tmp/x", "four")

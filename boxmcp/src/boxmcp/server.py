@@ -182,7 +182,12 @@ def box_service(
         command = f"systemctl --user status --no-pager -l {shlex.quote(unit)}"
     else:
         command = f"systemctl --user {action} {shlex.quote(unit)}"
-    return _ssh(command, timeout_seconds=120)
+    result = _ssh(command, timeout_seconds=120)
+    # systemctl status uses exit code 3 for a known unit that is inactive or
+    # activating. The inspection itself succeeded and its stdout is useful.
+    if action == "status" and result.get("exit_code") == 3:
+        result["ok"] = True
+    return result
 
 
 def main() -> None:
