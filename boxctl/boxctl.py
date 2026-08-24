@@ -199,10 +199,10 @@ def disable_foreign_box_blocks() -> int:
 
 
 # ---------------------------------------------------------------- auth: totp
-def mint_session_key(password: str, totp: str) -> str:
+def mint_session_key(password: str, totp: str, force_remote: bool = False) -> str:
     """Authenticate with password+TOTP, then install a FRESH local key into the
     box's authorized_keys with a TTL marker. Mirrors the 24h-session approach."""
-    import paramiko
+    import pexpect
 
     CFG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     # 1. fresh keypair (never reuse — a new one each mint)
@@ -218,48 +218,60 @@ def mint_session_key(password: str, totp: str) -> str:
     KEY.chmod(0o600)
     pubtext = pub.read_text().strip()
 
-    # 2. connect with password + TOTP through the cloudflared proxy
-    proxy = paramiko.ProxyCommand(f"{CLOUDFLARED} access ssh --hostname {HOST}")
-    cli = paramiko.SSHClient()
-    cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    def handler(title, instructions, prompts):
-        out = []
-        for prompt, _echo in prompts:
-            p = prompt.lower()
-            out.append(totp if ("code" in p or "token" in p or "verif" in p) else password)
-        return out
-
+    # 2. Use native OpenSSH for keyboard-interactive auth. Paramiko is rejected
+    # before authentication by some newer OpenSSH server configurations.
+    # Prefer direct LAN (including Bonjour/IPv6); use cloudflared outside.
+    lan = meta().get("lan_name") or meta().get("lan_host") or LAN_HOST_DEFAULT
+    ssh_args = ["-o", "ControlMaster=no", "-o", "ControlPath=none",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "PreferredAuthentications=keyboard-interactive,password",
+                "-o", "PubkeyAuthentication=no", "-o", "ConnectTimeout=20"]
+    if not force_remote and lan and lan_reachable(lan):
+        target = f"{USER}@{lan}"
+    else:
+        target = f"{USER}@{HOST}"
+        ssh_args += ["-o", f"ProxyCommand={CLOUDFLARED} access ssh --hostname {HOST}"]
+    install_cmd = (
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+        f"printf '%s\\n' {json.dumps(pubtext)} >> ~/.ssh/authorized_keys && "
+        "chmod 600 ~/.ssh/authorized_keys && echo INSTALLED"
+    )
+    child = pexpect.spawn("ssh", [*ssh_args, target, install_cmd],
+                          encoding="utf-8", timeout=60)
+    transcript = ""
     try:
-        t = paramiko.Transport(proxy)
-        t.start_client(timeout=25)
-        try:
-            t.auth_interactive(USER, handler)
-        except paramiko.AuthenticationException:
-            t.auth_password(USER, password)
-        if not t.is_authenticated():
+        for _ in range(8):
+            matched = child.expect([
+                r"(?i)password[^:\r\n]*:",
+                r"(?i)(verification|totp|token|code)[^:\r\n]*:",
+                r"(?i)are you sure you want to continue connecting[^?]*\?",
+                pexpect.EOF,
+                pexpect.TIMEOUT,
+            ])
+            transcript += child.before or ""
+            if matched == 0:
+                child.sendline(password)
+            elif matched == 1:
+                child.sendline(totp)
+            elif matched == 2:
+                child.sendline("yes")
+            elif matched == 3:
+                break
+            else:
+                raise RuntimeError("SSH authentication timed out")
+        child.close()
+        if "INSTALLED" not in transcript or child.exitstatus != 0:
             raise RuntimeError("authentication failed (check password / TOTP)")
-        # 3. append our pubkey
-        sess = t.open_session()
-        sess.exec_command(
-            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-            f"printf '%s\\n' {json.dumps(pubtext)} >> ~/.ssh/authorized_keys && "
-            "chmod 600 ~/.ssh/authorized_keys && echo INSTALLED")
-        out = sess.recv(4096).decode(errors="replace")
-        sess.close()
-        t.close()
-        if "INSTALLED" not in out:
-            raise RuntimeError(f"could not install key: {out.strip()[:200]}")
     finally:
-        try:
-            proxy.close()
-        except Exception:
-            pass
+        if child.isalive():
+            child.close(force=True)
 
     exp = time.time() + TTL_HOURS * 3600
-    META.write_text(json.dumps({"expires_at": exp, "minted_at": time.time(),
-                                "ttl_hours": TTL_HOURS, "host": HOST, "user": USER,
-                                "method": "totp", "pub": pubtext}, indent=2))
+    m = meta()
+    m.update({"expires_at": exp, "minted_at": time.time(),
+              "ttl_hours": TTL_HOURS, "host": HOST, "user": USER,
+              "method": "totp", "pub": pubtext})
+    META.write_text(json.dumps(m, indent=2))
     META.chmod(0o600)
     write_ssh_alias(identity=str(KEY))
     disable_foreign_box_blocks()
@@ -375,9 +387,13 @@ def tunnel_stop() -> int:
 # ---------------------------------------------------------------- commands
 def lan_reachable(host: str | None = None, timeout=1.5) -> bool:
     host = host or meta().get("lan_host") or LAN_HOST_DEFAULT
-    with socket.socket() as s:
-        s.settimeout(timeout)
-        return s.connect_ex((host, 22)) == 0
+    if not host:
+        return False
+    try:
+        with socket.create_connection((host, 22), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def detect_lan_host() -> str | None:
@@ -505,12 +521,14 @@ def cmd_connect(args) -> int:
         except Exception as e:  # noqa: BLE001
             print(f"{warn} passkey renew failed ({e}) — falling back to TOTP")
     print(f"{B}== box auth (password + TOTP) =={X}")
-    print(f"   host {USER}@{HOST}   ttl {TTL_HOURS}h")
+    route = HOST if args.remote else (meta().get("lan_name") or
+                                      meta().get("lan_host") or LAN_HOST_DEFAULT or HOST)
+    print(f"   host {USER}@{route}   ttl {TTL_HOURS}h")
     pw = getpass.getpass("   password: ")
     code = input("   TOTP code: ").strip()
     try:
         print("   authenticating…")
-        msg = mint_session_key(pw, code)
+        msg = mint_session_key(pw, code, force_remote=args.remote)
     except Exception as e:  # noqa: BLE001
         print(f"{bad} {e}")
         return 1
@@ -594,6 +612,8 @@ def main() -> int:
     sub.add_parser("status").set_defaults(fn=cmd_status)
     c = sub.add_parser("connect"); c.add_argument("--totp", action="store_true",
                                                   help="force password+TOTP")
+    c.add_argument("--remote", action="store_true",
+                   help="bootstrap through cloudflared even when LAN is reachable")
     c.set_defaults(fn=cmd_connect)
     sub.add_parser("setup-passkey").set_defaults(fn=lambda a: setup_passkey())
     t = sub.add_parser("tunnel"); t.add_argument("action", nargs="?", default="status",

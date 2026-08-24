@@ -15,7 +15,7 @@ BoxDeck drives boxctl — one tunnel keeper, one source of truth.
 
 ```bash
 # CLI
-cd boxctl && uv venv .venv && uv pip install --python .venv/bin/python paramiko
+cd boxctl && uv venv .venv && uv pip install --python .venv/bin/python pexpect
 ln -sf "$PWD/boxctl.sh" ~/.local/bin/boxctl        # or copy the launcher
 
 # App

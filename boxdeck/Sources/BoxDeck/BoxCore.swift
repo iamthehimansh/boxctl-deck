@@ -221,6 +221,12 @@ final class BoxModel: ObservableObject {
     func loadServices() async {
         let r = await Shell.run(["ssh", "-o", "BatchMode=yes", "box",
                                  Shell.q("cat \(Self.servicesPath) 2>/dev/null")], timeout: 30)
+        guard r.code == 0 else {
+            let reason = r.err.split(separator: "\n").last.map(String.init) ?? "SSH failed"
+            note("cannot load services — \(reason)")
+            banner = "Services unavailable: \(reason.prefix(120))"
+            return
+        }
         let data = Data(r.out.utf8)
         if let wrapper = try? JSONDecoder().decode([String: [BoxService]].self, from: data),
            let list = wrapper["services"], !list.isEmpty {
