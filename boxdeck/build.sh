@@ -40,4 +40,8 @@ if [ "$1" = "--install" ]; then
   cp -R "$APP" /Applications/BoxDeck.app
   codesign --force --deep --sign - /Applications/BoxDeck.app 2>/dev/null || true
   echo "==> installed to /Applications/BoxDeck.app"
+  # The installed copy is the only one that should remain runnable. Keeping the
+  # development bundle beside the sources makes Spotlight expose two identical
+  # apps and can lead to two tunnel keepers when the wrong copy is launched.
+  rm -rf "$APP"
 fi
