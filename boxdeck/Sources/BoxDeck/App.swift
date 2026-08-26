@@ -87,6 +87,7 @@ struct ContentView: View {
 
 struct StatusBar: View {
     @EnvironmentObject var box: BoxModel
+    @State private var showingTOTP = false
 
     var body: some View {
         HStack(spacing: 16) {
@@ -98,7 +99,11 @@ struct StatusBar: View {
 
             chip("route", box.status.route)
 
-            if box.status.passkey { chip("auth", "Touch ID", tint: .blue) }
+            if box.status.passkey {
+                chip("auth", box.status.passkeyExpired ? "Touch ID expired"
+                     : box.status.passkeyDays.map { String(format: "Touch ID %.0fd", $0) }
+                     ?? "Touch ID", tint: box.status.passkeyExpired ? .orange : .blue)
+            }
             if let h = box.status.keyHours {
                 chip("key", h > 0 ? String(format: "%.1fh", h) : "expired",
                      tint: h > 1 ? .secondary : .orange)
@@ -112,10 +117,18 @@ struct StatusBar: View {
 
             Spacer()
 
-            Button { Task { await box.reconnect() } } label: {
-                Label("Reconnect", systemImage: "touchid")
+            Menu {
+                Button { Task { await box.reconnect() } } label: {
+                    Label("Renew with Touch ID", systemImage: "touchid")
+                }
+                Button { showingTOTP = true } label: {
+                    Label("Password + TOTP…", systemImage: "number.square")
+                }
+            } label: {
+                Label(box.authBusy ? "Connecting…" : "Authenticate", systemImage: "person.badge.key")
             }
-            .help("boxctl connect — renews the silent session key with Touch ID")
+            .disabled(box.authBusy)
+            .help("Renew with Touch ID or recover with password + TOTP")
 
             Button { Task { await box.refreshAll() } } label: {
                 Image(systemName: "arrow.clockwise")
@@ -123,6 +136,7 @@ struct StatusBar: View {
             .help("Refresh status and services")
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
+        .sheet(isPresented: $showingTOTP) { TOTPLoginSheet() }
     }
 
     @ViewBuilder
@@ -133,6 +147,48 @@ struct StatusBar: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+struct TOTPLoginSheet: View {
+    @EnvironmentObject var box: BoxModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var password = ""
+    @State private var code = ""
+    @State private var remote = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Authenticate to the box", systemImage: "lock.shield")
+                .font(.headline)
+            Text("Use this if the 30-day Touch ID authorization expired. Credentials are sent directly to boxctl and are never saved.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Form {
+                SecureField("SSH password", text: $password)
+                TextField("6-digit TOTP", text: $code)
+                    .textContentType(.oneTimeCode)
+                Toggle("Force public domain (outside home)", isOn: $remote)
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button {
+                    Task {
+                        if await box.loginWithTOTP(password: password, code: code,
+                                                   remote: remote) { dismiss() }
+                    }
+                } label: {
+                    if box.authBusy { ProgressView().controlSize(.small) }
+                    else { Text("Connect") }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(password.isEmpty || code.count != 6 || box.authBusy)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
     }
 }
 

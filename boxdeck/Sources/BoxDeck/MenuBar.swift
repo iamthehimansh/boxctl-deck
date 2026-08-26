@@ -171,6 +171,7 @@ enum MenuBarGraph {
 struct MenuBarPanel: View {
     @EnvironmentObject var box: BoxModel
     @Environment(\.openWindow) private var openWindow
+    @State private var showingTOTP = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -184,6 +185,12 @@ struct MenuBarPanel: View {
                     Text(h > 0 ? String(format: "key %.1fh", h) : "key expired")
                         .font(.caption2)
                         .foregroundStyle(h > 1 ? Color.secondary : Color.orange)
+                }
+                if let d = box.status.passkeyDays {
+                    Text(String(format: "Touch ID %.0fd", d)).font(.caption2)
+                        .foregroundStyle(d > 3 ? Color.secondary : Color.orange)
+                } else if box.status.passkeyExpired {
+                    Text("Touch ID expired").font(.caption2).foregroundStyle(.orange)
                 }
             }
 
@@ -274,9 +281,17 @@ struct MenuBarPanel: View {
                     Label(box.status.tunnels.values.contains(true) ? "Tunnels on" : "Tunnels off",
                           systemImage: "cable.connector")
                 }
-                Button { Task { await box.reconnect() } } label: {
-                    Label("Reconnect", systemImage: "touchid")
+                Menu {
+                    Button { Task { await box.reconnect() } } label: {
+                        Label("Renew with Touch ID", systemImage: "touchid")
+                    }
+                    Button { showingTOTP = true } label: {
+                        Label("Password + TOTP…", systemImage: "number.square")
+                    }
+                } label: {
+                    Label("Authenticate", systemImage: "person.badge.key")
                 }
+                .disabled(box.authBusy)
             }
             .controlSize(.small)
 
@@ -303,6 +318,7 @@ struct MenuBarPanel: View {
         }
         .padding(14)
         .frame(width: 340)
+        .sheet(isPresented: $showingTOTP) { TOTPLoginSheet() }
     }
 
     @ViewBuilder

@@ -6,8 +6,8 @@ session key (same idea, own implementation) and can additionally install a
 Touch ID / Secure Enclave key so day-to-day connections need no TOTP at all.
 
 Auth methods
-  passkey  Secure Enclave key (Secretive) — Touch ID per connection, NO expiry.
-           Preferred once set up: nothing secret is stored on disk.
+  passkey  Secure Enclave key (Secretive) — Touch ID, sliding 30-day authorization.
+           Preferred once set up: nothing secret is stored on disk; use renews it.
   totp     password + TOTP -> mints a 24h key. Always kept as the bootstrap /
            recovery path (and the only way to install the passkey the first time).
 
@@ -53,6 +53,7 @@ META = CFG_DIR / "session.json"
 PASSKEY_PUB = CFG_DIR / "passkey.pub"
 SSH_CONFIG = pathlib.Path(os.path.expanduser("~/.ssh/config"))
 TTL_HOURS = int(os.environ.get("BOX_TTL_HOURS", "24"))
+PASSKEY_DAYS = int(os.environ.get("BOX_PASSKEY_DAYS", "30"))
 TUNNELS = [(8011, 8011), (11435, 11434)]        # local -> remote
 LAN_HOST_DEFAULT = os.environ.get("BOX_LAN_HOST") or _C.get("lan_host", "")
 SECRETIVE_SOCK = pathlib.Path(os.path.expanduser(
@@ -83,13 +84,38 @@ def key_remaining_h() -> float | None:
     return (m["expires_at"] - time.time()) / 3600.0
 
 
+def passkey_remaining_days() -> float | None:
+    """Days left on the server-enforced Secure Enclave authorization."""
+    expires = meta().get("passkey_expires_at")
+    if not expires:
+        return None
+    return (expires - time.time()) / 86400.0
+
+
+def passkey_authorization(pub: str, expires_at: float) -> str:
+    """Build an authorized_keys line with an OpenSSH-enforced UTC expiry."""
+    fields = pub.split()
+    if len(fields) < 2:
+        raise RuntimeError("invalid Secretive public key")
+    stamp = time.strftime("%Y%m%d%H%M%SZ", time.gmtime(expires_at))
+    return f'expiry-time="{stamp}" {fields[0]} {fields[1]} boxctl-passkey'
+
+
+def session_authorization(pub: str, expires_at: float) -> str:
+    """Build a server-expiring authorized_keys line for a silent session key."""
+    stamp = time.strftime("%Y%m%d%H%M%SZ", time.gmtime(expires_at))
+    return f'expiry-time="{stamp}" {pub}'
+
+
 def passkey_ready() -> bool:
     return SECRETIVE_SOCK.exists()
 
 
 def ssh_works(timeout=15) -> tuple[bool, str]:
-    r = run(["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}",
-             ALIAS, "echo BOXCTL_OK"], timeout=timeout + 10)
+    # Background checks must never reach Secretive and trigger Touch ID.
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+             "-o", f"ConnectTimeout={timeout}", ALIAS, "echo BOXCTL_OK"],
+            timeout=timeout + 10)
     return ("BOXCTL_OK" in r.stdout), (r.stderr.strip().splitlines() or [""])[-1]
 
 
@@ -217,6 +243,8 @@ def mint_session_key(password: str, totp: str, force_remote: bool = False) -> st
         raise RuntimeError(f"ssh-keygen failed: {r.stderr.strip()[:200]}")
     KEY.chmod(0o600)
     pubtext = pub.read_text().strip()
+    exp = time.time() + TTL_HOURS * 3600
+    session_line = session_authorization(pubtext, exp)
 
     # 2. Use native OpenSSH for keyboard-interactive auth. Paramiko is rejected
     # before authentication by some newer OpenSSH server configurations.
@@ -233,9 +261,19 @@ def mint_session_key(password: str, totp: str, force_remote: bool = False) -> st
         ssh_args += ["-o", f"ProxyCommand={CLOUDFLARED} access ssh --hostname {HOST}"]
     install_cmd = (
         "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-        f"printf '%s\\n' {json.dumps(pubtext)} >> ~/.ssh/authorized_keys && "
-        "chmod 600 ~/.ssh/authorized_keys && echo INSTALLED"
+        "touch ~/.ssh/authorized_keys && "
+        "sed -i '/boxctl-[0-9][0-9]*$/d' ~/.ssh/authorized_keys && "
+        f"printf '%s\\n' {json.dumps(session_line)} >> ~/.ssh/authorized_keys && "
+        "chmod 600 ~/.ssh/authorized_keys"
     )
+    passkey_expiry = None
+    if PASSKEY_PUB.exists():
+        passkey_expiry = time.time() + PASSKEY_DAYS * 86400
+        passkey_line = passkey_authorization(PASSKEY_PUB.read_text().strip(), passkey_expiry)
+        install_cmd += (" && sed -i '/boxctl-passkey/d' ~/.ssh/authorized_keys && "
+                        f"printf '%s\\n' {json.dumps(passkey_line)} "
+                        ">> ~/.ssh/authorized_keys")
+    install_cmd += " && echo INSTALLED"
     child = pexpect.spawn("ssh", [*ssh_args, target, install_cmd],
                           encoding="utf-8", timeout=60)
     transcript = ""
@@ -266,14 +304,17 @@ def mint_session_key(password: str, totp: str, force_remote: bool = False) -> st
         if child.isalive():
             child.close(force=True)
 
-    exp = time.time() + TTL_HOURS * 3600
     m = meta()
     m.update({"expires_at": exp, "minted_at": time.time(),
               "ttl_hours": TTL_HOURS, "host": HOST, "user": USER,
               "method": "totp", "pub": pubtext})
+    if passkey_expiry is not None:
+        m.update({"passkey": True, "passkey_expires_at": passkey_expiry,
+                  "passkey_days": PASSKEY_DAYS})
     META.write_text(json.dumps(m, indent=2))
     META.chmod(0o600)
-    write_ssh_alias(identity=str(KEY))
+    write_ssh_alias(identity=str(KEY),
+                    agent_sock=str(SECRETIVE_SOCK) if passkey_expiry is not None else None)
     disable_foreign_box_blocks()
     return f"session key installed, valid {TTL_HOURS}h"
 
@@ -281,7 +322,7 @@ def mint_session_key(password: str, totp: str, force_remote: bool = False) -> st
 # ---------------------------------------------------------------- auth: passkey
 def setup_passkey() -> int:
     """Install Secretive (Secure Enclave SSH agent) and authorize its key on the
-    box. Afterwards ssh needs only Touch ID — no TOTP, no 24h expiry."""
+    box for a sliding 30-day period."""
     print(f"{B}== Touch ID / Secure Enclave key setup =={X}")
     if not pathlib.Path("/Applications/Secretive.app").exists():
         print("Secretive not found — installing (Homebrew)…")
@@ -316,11 +357,12 @@ def setup_passkey() -> int:
         print(f"{bad} Need a working connection to authorize the key. Run "
               f"`boxctl connect --totp` first.\n   ssh said: {err}")
         return 1
-    marker = "boxctl-passkey"
+    passkey_expiry = time.time() + PASSKEY_DAYS * 86400
+    passkey_line = passkey_authorization(pub, passkey_expiry)
     cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && "
-           f"grep -q {json.dumps(pub.split()[1][:40])} ~/.ssh/authorized_keys "
-           f"|| printf '%s %s\\n' {json.dumps(' '.join(pub.split()[:2]))} {marker} "
-           ">> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys; echo DONE")
+           "sed -i '/boxctl-passkey/d' ~/.ssh/authorized_keys; "
+           f"printf '%s\\n' {json.dumps(passkey_line)} >> ~/.ssh/authorized_keys; "
+           "chmod 600 ~/.ssh/authorized_keys; echo DONE")
     r = run(["ssh", "-o", "BatchMode=yes", ALIAS, cmd], timeout=40)
     if "DONE" not in r.stdout:
         print(f"{bad} authorize failed: {r.stderr.strip()[:200]}")
@@ -330,10 +372,13 @@ def setup_passkey() -> int:
     write_ssh_alias(identity=str(KEY) if KEY.exists() else None,
                     agent_sock=str(SECRETIVE_SOCK))
     disable_foreign_box_blocks()
-    m = meta(); m["passkey"] = True; m["passkey_pub"] = pub
+    m = meta(); m.update({"passkey": True, "passkey_pub": pub,
+                          "passkey_expires_at": passkey_expiry,
+                          "passkey_days": PASSKEY_DAYS})
     META.write_text(json.dumps(m, indent=2))
-    print(f"{ok} Touch ID key authorized on the box.")
-    print("   From now on `ssh box` prompts Touch ID — no TOTP, no 24h expiry.")
+    META.chmod(0o600)
+    print(f"{ok} Touch ID key authorized on the box for {PASSKEY_DAYS} days.")
+    print("   Each successful Touch ID renewal extends that authorization.")
     return 0
 
 
@@ -439,7 +484,7 @@ def cmd_route(args) -> int:
     return 0
 
 
-def cmd_status(_args) -> int:
+def cmd_status(args) -> int:
     print(f"{B}== box status =={X}")
     lan = meta().get("lan_host") or LAN_HOST_DEFAULT
     on_lan = lan_reachable(lan)
@@ -447,7 +492,13 @@ def cmd_status(_args) -> int:
                                     else f"remote {HOST} (cloudflared)"))
     rem = key_remaining_h()
     if passkey_ready() and meta().get("passkey"):
-        print(f"  auth        {ok} Touch ID (Secure Enclave) — no expiry")
+        days = passkey_remaining_days()
+        if days is None:
+            print(f"  auth        {warn} Touch ID needs 30-day expiry migration")
+        elif days > 0:
+            print(f"  auth        {ok} Touch ID {days:.1f}d left (renews on use)")
+        else:
+            print(f"  auth        {bad} Touch ID EXPIRED → password + TOTP required")
     if rem is None:
         print(f"  session key {warn} none minted by boxctl")
     elif rem > 0:
@@ -459,10 +510,11 @@ def cmd_status(_args) -> int:
     for lp, _ in TUNNELS:
         print(f"  tunnel :{lp:<5}{ok if port_open(lp) else bad} "
               + ("open" if port_open(lp) else "closed"))
-    h = serve_health()
-    print(f"  omni serve  {ok if h.get('ok') else bad} "
-          + (f"ok, {h.get('vram_gb')}GB VRAM" if h.get("ok") else "unreachable"))
-    if good:
+    if not args.quick:
+        h = serve_health()
+        print(f"  omni serve  {ok if h.get('ok') else bad} "
+              + (f"ok, {h.get('vram_gb')}GB VRAM" if h.get("ok") else "unreachable"))
+    if good and not args.quick:
         g = run(["ssh", "-o", "BatchMode=yes", ALIAS,
                  "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader"],
                 timeout=25)
@@ -485,10 +537,16 @@ def renew_via_passkey() -> str:
         raise RuntimeError(f"ssh-keygen failed: {r.stderr.strip()[:200]}")
     KEY.chmod(0o600)
     pubtext = KEY.with_suffix(".pub").read_text().strip()
+    session_expiry = time.time() + TTL_HOURS * 3600
+    session_line = session_authorization(pubtext, session_expiry)
+    passkey_pub = PASSKEY_PUB.read_text().strip()
+    passkey_expiry = time.time() + PASSKEY_DAYS * 86400
+    passkey_line = passkey_authorization(passkey_pub, passkey_expiry)
     # authenticate with the passkey (Touch ID) and install the new key
     cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-           "sed -i '/boxctl-/d' ~/.ssh/authorized_keys 2>/dev/null; "
-           f"printf '%s\\n' {json.dumps(pubtext)} >> ~/.ssh/authorized_keys && "
+           "sed -i '/boxctl-/d;/boxctl-passkey/d' ~/.ssh/authorized_keys 2>/dev/null; "
+           f"printf '%s\\n' {json.dumps(session_line)} >> ~/.ssh/authorized_keys && "
+           f"printf '%s\\n' {json.dumps(passkey_line)} >> ~/.ssh/authorized_keys && "
            "chmod 600 ~/.ssh/authorized_keys && echo INSTALLED")
     env = dict(os.environ, SSH_AUTH_SOCK=str(SECRETIVE_SOCK))
     r = run(["ssh", "-o", "ConnectTimeout=25", "-o", f"IdentityFile={PASSKEY_PUB}",
@@ -496,18 +554,22 @@ def renew_via_passkey() -> str:
     if "INSTALLED" not in r.stdout:
         raise RuntimeError(f"install failed: {(r.stderr or r.stdout).strip()[:200]}")
     m = meta()
-    m.update({"expires_at": time.time() + TTL_HOURS * 3600, "minted_at": time.time(),
-              "ttl_hours": TTL_HOURS, "method": "passkey", "pub": pubtext})
+    m.update({"expires_at": session_expiry, "minted_at": time.time(),
+              "ttl_hours": TTL_HOURS, "method": "passkey", "pub": pubtext,
+              "passkey_expires_at": passkey_expiry, "passkey_days": PASSKEY_DAYS})
     META.write_text(json.dumps(m, indent=2))
     META.chmod(0o600)
     write_ssh_alias(identity=str(KEY), agent_sock=str(SECRETIVE_SOCK))
-    return f"renewed via Touch ID — silent for {TTL_HOURS}h"
+    return (f"renewed via Touch ID — silent for {TTL_HOURS}h; "
+            f"Touch ID valid {PASSKEY_DAYS}d")
 
 
 def cmd_connect(args) -> int:
     rem = key_remaining_h()
-    if not args.totp and passkey_ready() and meta().get("passkey"):
-        if rem is not None and rem > 0.5:
+    pass_days = passkey_remaining_days()
+    if (not args.totp and passkey_ready() and meta().get("passkey")
+            and pass_days is not None and pass_days > 0):
+        if not args.touch_id and rem is not None and rem > 0.5:
             good, err = ssh_works()
             if good:
                 print(f"{ok} already connected (session key: {rem:.1f}h left, no prompt)")
@@ -519,13 +581,30 @@ def cmd_connect(args) -> int:
             print(f"   verify: {ok if good else bad} " + ("ssh box works silently" if good else err[:70]))
             return 0 if good else 1
         except Exception as e:  # noqa: BLE001
+            if args.touch_id:
+                print(f"{bad} Touch ID renewal failed ({e}) — use password + TOTP")
+                return 1
             print(f"{warn} passkey renew failed ({e}) — falling back to TOTP")
+    elif not args.totp and meta().get("passkey"):
+        if args.touch_id:
+            print(f"{bad} Touch ID authorization expired — use password + TOTP")
+            return 1
+        print(f"{warn} Touch ID authorization expired or needs migration — use TOTP")
     print(f"{B}== box auth (password + TOTP) =={X}")
     route = HOST if args.remote else (meta().get("lan_name") or
                                       meta().get("lan_host") or LAN_HOST_DEFAULT or HOST)
     print(f"   host {USER}@{route}   ttl {TTL_HOURS}h")
-    pw = getpass.getpass("   password: ")
-    code = input("   TOTP code: ").strip()
+    if args.stdin_json:
+        try:
+            credentials = json.load(sys.stdin)
+            pw = str(credentials["password"])
+            code = str(credentials["totp"]).strip()
+        except Exception as e:
+            print(f"{bad} invalid credentials input: {e}")
+            return 2
+    else:
+        pw = getpass.getpass("   password: ")
+        code = input("   TOTP code: ").strip()
     try:
         print("   authenticating…")
         msg = mint_session_key(pw, code, force_remote=args.remote)
@@ -536,8 +615,8 @@ def cmd_connect(args) -> int:
     good, err = ssh_works()
     print(f"   verify: {ok if good else bad} " + ("ssh box works" if good else err[:70]))
     if good and not meta().get("passkey"):
-        print(f"\n{Y}tip{X}: run `boxctl setup-passkey` once — then it is Touch ID "
-              f"instead of TOTP, and it never expires.")
+        print(f"\n{Y}tip{X}: run `boxctl setup-passkey` once — Touch ID then renews "
+              f"its 30-day authorization whenever you use it.")
     return 0 if good else 1
 
 
@@ -609,11 +688,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog="boxctl", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
-    sub.add_parser("status").set_defaults(fn=cmd_status)
+    s = sub.add_parser("status")
+    s.add_argument("--quick", action="store_true", help="skip service and GPU probes")
+    s.set_defaults(fn=cmd_status)
     c = sub.add_parser("connect"); c.add_argument("--totp", action="store_true",
                                                   help="force password+TOTP")
     c.add_argument("--remote", action="store_true",
                    help="bootstrap through cloudflared even when LAN is reachable")
+    c.add_argument("--touch-id", action="store_true",
+                   help="force Touch ID renewal; never fall back to an interactive TOTP prompt")
+    c.add_argument("--stdin-json", action="store_true", help=argparse.SUPPRESS)
     c.set_defaults(fn=cmd_connect)
     sub.add_parser("setup-passkey").set_defaults(fn=lambda a: setup_passkey())
     t = sub.add_parser("tunnel"); t.add_argument("action", nargs="?", default="status",

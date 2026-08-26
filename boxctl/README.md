@@ -30,11 +30,14 @@ re-discovers the address if that ever fails.
 
 | method | how it feels | expiry |
 |---|---|---|
-| **passkey** (`boxctl setup-passkey`) | Touch ID prompt | **never** |
+| **passkey** (`boxctl setup-passkey`) | Touch ID prompt | sliding 30 days |
 | **totp** (`boxctl connect --totp`) | password + 6-digit code | 24 h |
 
 `passkey` uses a **Secure Enclave** key via [Secretive]: the private key is
 generated inside the enclave, cannot be exported, and every use requires Touch ID.
+The server enforces a 30-day expiry; every successful Touch ID renewal extends it
+another 30 days. Password + TOTP in BoxDeck or `boxctl connect --totp` recovers an
+expired authorization.
 TOTP is kept as the bootstrap (it's how the passkey gets authorized the first
 time) and as recovery if the Mac is unavailable.
 

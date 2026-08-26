@@ -8,7 +8,8 @@ import Foundation
 /// same commands you would type, so behaviour matches the terminal exactly.
 enum Shell {
     @discardableResult
-    static func run(_ args: [String], timeout: TimeInterval = 30) async -> (out: String, err: String, code: Int32) {
+    static func run(_ args: [String], timeout: TimeInterval = 30,
+                    input: String? = nil) async -> (out: String, err: String, code: Int32) {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 let p = Process()
@@ -17,9 +18,15 @@ enum Shell {
                 p.arguments = ["-lc", args.joined(separator: " ")]
                 let o = Pipe(), e = Pipe()
                 p.standardOutput = o; p.standardError = e
+                let inputPipe = input == nil ? nil : Pipe()
+                if let inputPipe { p.standardInput = inputPipe }
                 var outData = Data(), errData = Data()
                 do { try p.run() } catch {
                     cont.resume(returning: ("", "launch failed: \(error)", 127)); return
+                }
+                if let inputPipe, let input {
+                    inputPipe.fileHandleForWriting.write(Data(input.utf8))
+                    try? inputPipe.fileHandleForWriting.close()
                 }
                 let deadline = DispatchTime.now() + timeout
                 DispatchQueue.global().asyncAfter(deadline: deadline) {
@@ -73,6 +80,8 @@ struct BoxStatus {
     var sshOK = false
     var keyHours: Double?     // session-key hours remaining
     var passkey = false
+    var passkeyDays: Double?
+    var passkeyExpired = false
     var tunnels: [Int: Bool] = [:]
     var gpuUsedMB: Int?
     var gpuTotalMB: Int?
@@ -98,6 +107,7 @@ final class BoxModel: ObservableObject {
     @Published var banner: String?
     @Published var log: [String] = []
     @Published var launchAtLogin = false      // refreshed after launch
+    @Published var authBusy = false
     @Published var stats = BoxStats()
     @Published var mac = MacStats()
     /// Rolling history for the menu-bar sparkline (newest last).
@@ -153,6 +163,7 @@ final class BoxModel: ObservableObject {
     func startPolling(every seconds: UInt64 = 5) {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
+            var tick = 0
             while !Task.isCancelled {
                 let b = await StatsReader.box()
                 let m = await StatsReader.mac()
@@ -183,6 +194,9 @@ final class BoxModel: ObservableObject {
                         } else { self.push(&self.ramHistory, Double(r) / 100) }
                     }
                 }
+                tick += 1
+                if tick.isMultiple(of: 3) { await self?.refreshStatus() }
+                if tick.isMultiple(of: 6) { await self?.refreshServices() }
                 try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             }
         }
@@ -290,7 +304,7 @@ final class BoxModel: ObservableObject {
     }
 
     func refreshStatus() async {
-        let r = await Shell.run(["boxctl", "status"], timeout: 45)
+        let r = await Shell.run(["boxctl", "status", "--quick"], timeout: 20)
         var s = BoxStatus()
         for line in r.out.split(separator: "\n").map(String.init) {
             let plain = line.replacingOccurrences(of: "\u{1B}[[0-9;]*m", with: "",
@@ -299,6 +313,12 @@ final class BoxModel: ObservableObject {
                 s.route = plain.contains("LAN") ? "LAN (direct)" : "remote (cloudflared)"
             }
             if plain.contains("auth") && plain.contains("Touch ID") { s.passkey = true }
+            if plain.contains("Touch ID EXPIRED") || plain.contains("needs 30-day") {
+                s.passkeyExpired = true
+            }
+            if plain.contains("auth"), let d = plain.firstMatch(#"([0-9.]+)d left"#) {
+                s.passkeyDays = Double(d)
+            }
             if plain.contains("session key"), let h = plain.firstMatch(#"([0-9.]+)h left"#) {
                 s.keyHours = Double(h)
             }
@@ -438,12 +458,36 @@ final class BoxModel: ObservableObject {
     }
 
     func reconnect() async {
+        guard !authBusy else { return }
+        authBusy = true
+        defer { authBusy = false }
         note("boxctl connect (Touch ID if the key expired)")
-        let r = await Shell.run(["boxctl", "connect"], timeout: 180)
+        let r = await Shell.run(["boxctl", "connect", "--touch-id"], timeout: 180)
         banner = r.out.replacingOccurrences(of: "\u{1B}[[0-9;]*m", with: "",
                                             options: .regularExpression)
             .split(separator: "\n").last.map(String.init)
         await refreshAll()
+    }
+
+    func loginWithTOTP(password: String, code: String, remote: Bool) async -> Bool {
+        guard !authBusy else { return false }
+        authBusy = true
+        defer { authBusy = false }
+        note("boxctl connect (password + TOTP)")
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: ["password": password, "totp": code]),
+              let payload = String(data: data, encoding: .utf8) else {
+            banner = "Could not prepare credentials"
+            return false
+        }
+        var args = ["boxctl", "connect", "--totp", "--stdin-json"]
+        if remote { args.append("--remote") }
+        let r = await Shell.run(args, timeout: 180, input: payload)
+        let clean = (r.out + r.err).replacingOccurrences(
+            of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
+        banner = clean.split(separator: "\n").last.map(String.init)
+        await refreshAll()
+        return r.code == 0
     }
 }
 
