@@ -16,6 +16,19 @@ enum Shell {
                 p.executableURL = URL(fileURLWithPath: "/bin/zsh")
                 // login shell so ~/.local/bin (boxctl) and brew are on PATH
                 p.arguments = ["-lc", args.joined(separator: " ")]
+                // Apps launched from Finder/login items inherit a minimal PATH.
+                // Supply the CLI and Homebrew locations explicitly so BoxDeck
+                // behaves identically whether opened from Terminal or at login.
+                var environment = ProcessInfo.processInfo.environment
+                let home = FileManager.default.homeDirectoryForCurrentUser.path
+                let required = ["\(home)/.local/bin", "/opt/homebrew/bin",
+                                "/opt/homebrew/sbin", "/usr/local/bin",
+                                "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+                let inherited = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
+                var seen = Set<String>()
+                environment["PATH"] = (required + inherited).filter { seen.insert($0).inserted }
+                    .joined(separator: ":")
+                p.environment = environment
                 let o = Pipe(), e = Pipe()
                 p.standardOutput = o; p.standardError = e
                 let inputPipe = input == nil ? nil : Pipe()
@@ -305,6 +318,13 @@ final class BoxModel: ObservableObject {
 
     func refreshStatus() async {
         let r = await Shell.run(["boxctl", "status", "--quick"], timeout: 20)
+        guard r.code == 0 else {
+            let reason = (r.err.isEmpty ? r.out : r.err).split(separator: "\n").last
+                .map(String.init) ?? "boxctl failed"
+            note("status unavailable — \(reason)")
+            banner = "Status unavailable: \(reason.prefix(120))"
+            return
+        }
         var s = BoxStatus()
         for line in r.out.split(separator: "\n").map(String.init) {
             let plain = line.replacingOccurrences(of: "\u{1B}[[0-9;]*m", with: "",
