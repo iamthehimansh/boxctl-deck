@@ -36,7 +36,7 @@ if [ "$BUNDLE" = true ]; then
     -path '*/xpra/platform/gui.py' -print -quit)"
   [ -n "$CURSOR_GUI" ] || { echo "Xpra cursor backend missing" >&2; exit 1; }
   perl -0pi -e 's/(def get_fixed_cursor_size\(\) -> tuple\[int, int\]:\n)    return -1, -1/$1    return 16, 16/' "$CURSOR_GUI"
-  grep -A1 'def get_fixed_cursor_size' "$CURSOR_GUI" | grep -q 'return 16, 16' || {
+  grep -A8 'def get_fixed_cursor_size' "$CURSOR_GUI" | grep -q 'return 16, 16' || {
     echo "Xpra cursor patch did not apply" >&2; exit 1;
   }
   cp "$HERE/../boxctl/dist/boxctl" "$APP/Contents/Helpers/boxctl"
