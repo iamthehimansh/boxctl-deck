@@ -225,8 +225,10 @@ final class BoxModel: ObservableObject {
     /// Tear the keeper down with the app — "attached to this app only".
     func appWillQuit() {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", "boxctl tunnel stop"]
+        let boxctl = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/boxctl").path
+        p.executableURL = URL(fileURLWithPath: boxctl)
+        p.arguments = ["tunnel", "stop"]
         try? p.run()
         p.waitUntilExit()
     }
@@ -246,7 +248,8 @@ final class BoxModel: ObservableObject {
     /// Read ~/services.json from the box. Seeds it with the known units the first
     /// time so the file always exists and is editable by hand or by the skill.
     func loadServices() async {
-        let r = await Shell.run(["ssh", "-o", "BatchMode=yes", "box",
+        let r = await Shell.run(["ssh", "-o", "BatchMode=yes",
+                                 "-o", "IdentityAgent=none", "box",
                                  Shell.q("cat \(Self.servicesPath) 2>/dev/null")], timeout: 30)
         guard r.code == 0 else {
             let reason = r.err.split(separator: "\n").last.map(String.init) ?? "SSH failed"
@@ -283,14 +286,17 @@ final class BoxModel: ObservableObject {
         guard let json = try? enc.encode(["services": services]),
               let b64 = String(data: json.base64EncodedData(), encoding: .utf8) else { return }
         let cmd = "printf %s \(b64) | base64 -d > \(Self.servicesPath)"
-        let r = await Shell.run(["ssh", "box", Shell.q(cmd)], timeout: 30)
+        let r = await Shell.run(["ssh", "-o", "BatchMode=yes",
+                                 "-o", "IdentityAgent=none", "box", Shell.q(cmd)], timeout: 30)
         if r.code != 0 { banner = "save services.json: \(r.err.prefix(120))" }
         else { note("services.json saved (\(services.count) services)") }
     }
 
     func restart(_ svc: BoxService) async {
         note("restart \(svc.label)")
-        _ = await Shell.run(["ssh", "box", Shell.q("systemctl --user restart \(svc.id)")], timeout: 120)
+        _ = await Shell.run(["ssh", "-o", "BatchMode=yes",
+                             "-o", "IdentityAgent=none", "box",
+                             Shell.q("systemctl --user restart \(svc.id)")], timeout: 120)
         await refreshServices()
     }
 
@@ -359,7 +365,7 @@ final class BoxModel: ObservableObject {
         for i in services.indices {
             let unit = services[i].id
             let r = await Shell.run(
-                ["ssh", "-o", "BatchMode=yes", "box",
+                ["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", "box",
                  Shell.q("systemctl --user is-active \(unit); systemctl --user is-enabled \(unit)")],
                 timeout: 40)
             let lines = r.out.split(separator: "\n").map(String.init)
@@ -381,7 +387,8 @@ final class BoxModel: ObservableObject {
             for j in services.indices where services[j].id != svc.id
                 && services[j].gpu && services[j].active {
                 note("stopping \(services[j].label) — the 16GB GPU fits only one")
-                _ = await Shell.run(["ssh", "box",
+                _ = await Shell.run(["ssh", "-o", "BatchMode=yes",
+                                     "-o", "IdentityAgent=none", "box",
                                      Shell.q("systemctl --user stop \(services[j].id)")], timeout: 60)
                 services[j].active = false
             }
@@ -389,7 +396,8 @@ final class BoxModel: ObservableObject {
         services[i].busy = true
         let verb = turningOn ? "start" : "stop"
         note("\(verb) \(svc.label)…")
-        let r = await Shell.run(["ssh", "box",
+        let r = await Shell.run(["ssh", "-o", "BatchMode=yes",
+                                 "-o", "IdentityAgent=none", "box",
                                  Shell.q("systemctl --user \(verb) \(svc.id)")], timeout: 120)
         if r.code != 0 { banner = "\(svc.label): \(r.err.prefix(120))" }
         // starting the omni serve takes ~60s to load the model
@@ -409,7 +417,8 @@ final class BoxModel: ObservableObject {
         let cmd = "cd \(target) 2>/dev/null && pwd 1>&2 && ls -Ap --file-type 2>/dev/null | head -500 | " +
                   "while IFS= read -r n; do s=$(stat -c%s \"${n%/}\" 2>/dev/null || echo 0); " +
                   "printf '%s\\t%s\\t%s\\n' \"$([ -d \"${n%/}\" ] && echo d || echo f)\" \"$s\" \"${n%/}\"; done"
-        let r = await Shell.run(["ssh", "-o", "BatchMode=yes", "box", Shell.q(cmd)], timeout: 45)
+        let r = await Shell.run(["ssh", "-o", "BatchMode=yes",
+                                 "-o", "IdentityAgent=none", "box", Shell.q(cmd)], timeout: 45)
         guard r.code == 0 || !r.out.isEmpty else {
             banner = "cannot read \(path): \(r.err.prefix(100))"
             return

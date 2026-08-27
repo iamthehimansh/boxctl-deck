@@ -95,7 +95,8 @@ enum StatsReader {
         // CPU/NVMe temperature readings. Ship it base64-encoded instead, so the
         // remote shell sees the script byte-for-byte.
         let b64 = Data(remoteCommand.utf8).base64EncodedString()
-        let r = await Shell.run(["ssh", "-o", "BatchMode=yes", "box",
+        let r = await Shell.run(["ssh", "-o", "BatchMode=yes",
+                                 "-o", "IdentityAgent=none", "box",
                                  Shell.q("echo \(b64) | base64 -d | bash")], timeout: 25)
         return parse(r.out)
     }

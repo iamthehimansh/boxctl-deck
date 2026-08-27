@@ -363,7 +363,8 @@ def setup_passkey() -> int:
            "sed -i '/boxctl-passkey/d' ~/.ssh/authorized_keys; "
            f"printf '%s\\n' {json.dumps(passkey_line)} >> ~/.ssh/authorized_keys; "
            "chmod 600 ~/.ssh/authorized_keys; echo DONE")
-    r = run(["ssh", "-o", "BatchMode=yes", ALIAS, cmd], timeout=40)
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+             ALIAS, cmd], timeout=40)
     if "DONE" not in r.stdout:
         print(f"{bad} authorize failed: {r.stderr.strip()[:200]}")
         return 1
@@ -404,7 +405,8 @@ def tunnel_start() -> int:
     # keeper loop: reconnects on drop; stale links die in ~30s via ServerAlive
     script = (f"while :; do /usr/bin/ssh -N -o ExitOnForwardFailure=yes "
               f"-o ServerAliveInterval=10 -o ServerAliveCountMax=2 -o TCPKeepAlive=yes "
-              f"-o BatchMode=yes {' '.join(fwd)} {ALIAS} >/dev/null 2>&1; sleep 3; done")
+              f"-o BatchMode=yes -o IdentityAgent=none "
+              f"{' '.join(fwd)} {ALIAS} >/dev/null 2>&1; sleep 3; done")
     subprocess.Popen(["/bin/bash", "-c", f"exec -a boxctl-tunnel /bin/bash -c {json.dumps(script)}"],
                      start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -444,9 +446,11 @@ def lan_reachable(host: str | None = None, timeout=1.5) -> bool:
 def detect_lan_host() -> str | None:
     """Ask the box (over whatever route works) for its current LAN address and
     remember it — DHCP can move it."""
-    r = run(["ssh", "-o", "BatchMode=yes", f"{ALIAS}-remote", "hostname -I"], timeout=40)
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+             f"{ALIAS}-remote", "hostname -I"], timeout=40)
     if r.returncode != 0:
-        r = run(["ssh", "-o", "BatchMode=yes", ALIAS, "hostname -I"], timeout=40)
+        r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                 ALIAS, "hostname -I"], timeout=40)
     for ip in r.stdout.split():
         if ip.startswith(("192.168.", "10.")) and lan_reachable(ip):
             m = meta(); m["lan_host"] = ip
@@ -460,7 +464,8 @@ def route_timing() -> list[tuple[str, bool, float]]:
     out = []
     for alias in (f"{ALIAS}-lan", f"{ALIAS}-remote"):
         t0 = time.time()
-        r = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+        r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                 "-o", "ConnectTimeout=8",
                  alias, "echo OK"], timeout=45)
         out.append((alias, "OK" in r.stdout, time.time() - t0))
     return out
@@ -515,7 +520,7 @@ def cmd_status(args) -> int:
         print(f"  omni serve  {ok if h.get('ok') else bad} "
               + (f"ok, {h.get('vram_gb')}GB VRAM" if h.get("ok") else "unreachable"))
     if good and not args.quick:
-        g = run(["ssh", "-o", "BatchMode=yes", ALIAS,
+        g = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
                  "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader"],
                 timeout=25)
         if g.stdout.strip():
