@@ -128,8 +128,7 @@ struct AppDrawer: View {
             Divider()
             List(filtered) { app in
                 HStack(spacing: 10) {
-                    Image(systemName: "app.dashed")
-                        .font(.title2).foregroundStyle(.blue).frame(width: 28)
+                    RemoteAppIcon(app: app)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(app.name).fontWeight(.medium)
                         if !app.detail.isEmpty {
@@ -137,6 +136,13 @@ struct AppDrawer: View {
                         }
                     }
                     Spacer()
+                    Button {
+                        box.toggleShortcut(app)
+                    } label: {
+                        Image(systemName: box.shortcutIDs.contains(app.id) ? "star.fill" : "star")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(box.shortcutIDs.contains(app.id) ? "Remove macOS Applications shortcut" : "Add macOS Applications shortcut")
                     Button("Launch") { Task { await box.launch(app, microphone: shareMicrophone) } }
                         .buttonStyle(.borderedProminent).controlSize(.small)
                         .disabled(!box.guiReady)
@@ -163,6 +169,23 @@ struct AppDrawer: View {
         let value = command
         command = ""
         Task { await box.launchGUICommand(value, microphone: shareMicrophone) }
+    }
+}
+
+private struct RemoteAppIcon: View {
+    let app: RemoteApp
+
+    var body: some View {
+        Group {
+            if let encoded = app.iconData, let data = Data(base64Encoded: encoded),
+               let image = NSImage(data: data) {
+                Image(nsImage: image).resizable().scaledToFit()
+            } else {
+                Image(systemName: "app.dashed").resizable().scaledToFit()
+                    .foregroundStyle(.blue)
+            }
+        }
+        .frame(width: 32, height: 32)
     }
 }
 

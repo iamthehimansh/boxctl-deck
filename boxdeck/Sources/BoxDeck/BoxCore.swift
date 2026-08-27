@@ -1,3 +1,5 @@
+import AppKit
+import CoreImage
 import Foundation
 
 // MARK: - shell
@@ -82,6 +84,7 @@ struct RemoteApp: Identifiable, Hashable, Codable {
     let name: String
     let detail: String
     let icon: String
+    let iconData: String?
 }
 
 struct BoxService: Identifiable, Hashable, Codable {
@@ -125,6 +128,7 @@ final class BoxModel: ObservableObject {
     @Published var entries: [RemoteFile] = []
     @Published var selected: RemoteFile?
     @Published var apps: [RemoteApp] = []
+    @Published var shortcutIDs = Set(UserDefaults.standard.stringArray(forKey: "remoteAppShortcuts") ?? [])
     @Published var appsLoading = false
     @Published var guiReady = false
     @Published var loading = false
@@ -340,6 +344,8 @@ final class BoxModel: ObservableObject {
     func refreshStatus() async {
         let r = await Shell.run(["boxctl", "status", "--quick"], timeout: 20)
         guard r.code == 0 else {
+            status.sshOK = false
+            refreshShortcutIcons()
             let reason = (r.err.isEmpty ? r.out : r.err).split(separator: "\n").last
                 .map(String.init) ?? "boxctl failed"
             note("status unavailable — \(reason)")
@@ -374,6 +380,7 @@ final class BoxModel: ObservableObject {
             }
         }
         status = s
+        refreshShortcutIcons()
     }
 
     func refreshServices() async {
@@ -487,7 +494,72 @@ final class BoxModel: ObservableObject {
             return
         }
         apps = decoded
+        refreshShortcutIcons()
         note("loaded \(decoded.count) GUI applications")
+    }
+
+    func toggleShortcut(_ app: RemoteApp) {
+        if shortcutIDs.contains(app.id) {
+            shortcutIDs.remove(app.id)
+            try? FileManager.default.removeItem(at: shortcutURL(app))
+            note("removed \(app.name) shortcut")
+        } else {
+            shortcutIDs.insert(app.id)
+            do {
+                try createShortcut(app)
+                note("added \(app.name) to Applications")
+            } catch {
+                shortcutIDs.remove(app.id)
+                banner = "Shortcut: \(error.localizedDescription)"
+            }
+        }
+        UserDefaults.standard.set(Array(shortcutIDs).sorted(), forKey: "remoteAppShortcuts")
+    }
+
+    private func shortcutURL(_ app: RemoteApp) -> URL {
+        let safe = app.name.replacingOccurrences(of: "/", with: "-")
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications/\(safe) (Box).app")
+    }
+
+    private func createShortcut(_ app: RemoteApp) throws {
+        let bundle = shortcutURL(app), contents = bundle.appendingPathComponent("Contents")
+        let macOS = contents.appendingPathComponent("MacOS")
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        let executable = macOS.appendingPathComponent("launch")
+        let script = "#!/bin/zsh\nexec \"/Applications/BoxDeck.app/Contents/Helpers/boxctl\" gui launch --desktop \(Shell.q(app.id))\n"
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let identifier = app.id.replacingOccurrences(of: ".", with: "-")
+        let plist: [String: Any] = ["CFBundleName": app.name, "CFBundleDisplayName": app.name,
+            "CFBundleIdentifier": "in.himansh.boxdeck.remote.\(identifier)",
+            "CFBundleExecutable": "launch", "CFBundlePackageType": "APPL", "CFBundleVersion": "1"]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: contents.appendingPathComponent("Info.plist"), options: .atomic)
+        refreshShortcutIcon(app)
+    }
+
+    private func refreshShortcutIcons() {
+        for app in apps where shortcutIDs.contains(app.id) { refreshShortcutIcon(app) }
+    }
+
+    private func refreshShortcutIcon(_ app: RemoteApp) {
+        guard let encoded = app.iconData, let data = Data(base64Encoded: encoded),
+              var source = NSImage(data: data) else { return }
+        if !status.sshOK, let tiff = source.tiffRepresentation,
+           let ci = CIImage(data: tiff)?.applyingFilter("CIColorControls", parameters: ["inputSaturation": 0.0]),
+           let cg = CIContext().createCGImage(ci, from: ci.extent) {
+            source = NSImage(cgImage: cg, size: source.size)
+        }
+        let canvas = NSImage(size: NSSize(width: 512, height: 512))
+        canvas.lockFocus()
+        source.draw(in: NSRect(x: 32, y: 32, width: 448, height: 448))
+        NSColor.systemOrange.setFill()
+        NSBezierPath(roundedRect: NSRect(x: 300, y: 34, width: 180, height: 76), xRadius: 16, yRadius: 16).fill()
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 44), .foregroundColor: NSColor.white]
+        ("BOX" as NSString).draw(at: NSPoint(x: 344, y: 46), withAttributes: attrs)
+        canvas.unlockFocus()
+        NSWorkspace.shared.setIcon(canvas, forFile: shortcutURL(app).path, options: [])
     }
 
     func launch(_ app: RemoteApp, microphone: Bool = false) async {

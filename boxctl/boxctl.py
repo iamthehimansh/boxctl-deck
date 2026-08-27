@@ -712,9 +712,24 @@ def gui_apps() -> tuple[int, str]:
         return 0, server.stdout
     # Compatibility fallback for boxes not enrolled with boxserver yet.
     script = r'''
-import configparser, glob, json, os
+import base64, configparser, glob, json, os
 roots = ["/usr/share/applications", os.path.expanduser("~/.local/share/applications")]
 apps = {}
+icon_files = []
+for icon_root in (os.path.expanduser("~/.local/share/icons"), "/usr/share/icons/hicolor", "/usr/share/icons", "/usr/share/pixmaps"):
+    for folder, _, files in os.walk(icon_root):
+        icon_files += [os.path.join(folder, f) for f in files if f.rsplit(".", 1)[-1].lower() in ("png", "svg", "xpm")]
+def icon_data(value):
+    if not value: return ""
+    candidates = [value] if os.path.isabs(value) else []
+    candidates += [p for p in icon_files if os.path.splitext(os.path.basename(p))[0] == value]
+    candidates.sort(key=lambda p: ("/64x64/" not in p, "/48x48/" not in p, "/scalable/" not in p, len(p)))
+    for path in candidates:
+        try:
+            data = open(path, "rb").read()
+            if len(data) <= 512000: return base64.b64encode(data).decode()
+        except OSError: pass
+    return ""
 for root in roots:
     for path in glob.glob(root + "/*.desktop"):
         c = configparser.ConfigParser(interpolation=None, strict=False)
@@ -726,8 +741,10 @@ for root in roots:
             name, command = d.get("Name", "").strip(), d.get("Exec", "").strip()
             if not name or not command: continue
             ident = os.path.basename(path)
+            icon = d.get("Icon", "").strip()
             apps[ident] = {"id": ident, "name": name,
-                "detail": d.get("Comment", "").strip(), "icon": d.get("Icon", "").strip()}
+                "detail": d.get("Comment", "").strip(), "icon": icon,
+                "iconData": icon_data(icon)}
         except Exception:
             pass
 print(json.dumps(sorted(apps.values(), key=lambda x: x["name"].casefold())))
@@ -822,7 +839,7 @@ def cmd_gui(args) -> int:
 # ---------------------------------------------------------------- portable box profile
 BOXSERVER = r'''#!/usr/bin/env python3
 """boxserver: the SSH-only BoxDeck endpoint (no daemon and no listening port)."""
-import argparse, glob, json, os, platform, shutil
+import argparse, base64, glob, json, os, platform, shutil
 from pathlib import Path
 
 PROFILE = Path.home() / ".config/boxserver/profile.json"
@@ -841,6 +858,21 @@ def profile():
 def apps():
     import configparser
     found = {}
+    icon_files = []
+    for icon_root in (str(Path.home()/".local/share/icons"), "/usr/share/icons/hicolor", "/usr/share/icons", "/usr/share/pixmaps"):
+        for folder, _, files in os.walk(icon_root):
+            icon_files += [os.path.join(folder, f) for f in files if f.rsplit(".", 1)[-1].lower() in ("png", "svg", "xpm")]
+    def icon_data(value):
+        if not value: return ""
+        candidates = [value] if os.path.isabs(value) else []
+        candidates += [p for p in icon_files if os.path.splitext(os.path.basename(p))[0] == value]
+        candidates.sort(key=lambda p: ("/64x64/" not in p, "/48x48/" not in p, "/scalable/" not in p, len(p)))
+        for path in candidates:
+            try:
+                data = Path(path).read_bytes()
+                if len(data) <= 512000: return base64.b64encode(data).decode()
+            except OSError: pass
+        return ""
     for root in ("/usr/share/applications", str(Path.home()/".local/share/applications")):
         for path in glob.glob(root + "/*.desktop"):
             c = configparser.ConfigParser(interpolation=None, strict=False)
@@ -850,7 +882,8 @@ def apps():
                 name, command = d.get("Name", "").strip(), d.get("Exec", "").strip()
                 if name and command:
                     ident = os.path.basename(path)
-                    found[ident] = {"id": ident, "name": name, "detail": d.get("Comment", "").strip(), "icon": d.get("Icon", "").strip()}
+                    icon = d.get("Icon", "").strip()
+                    found[ident] = {"id": ident, "name": name, "detail": d.get("Comment", "").strip(), "icon": icon, "iconData": icon_data(icon)}
             except Exception: pass
     print(json.dumps(sorted(found.values(), key=lambda x: x["name"].casefold())))
 

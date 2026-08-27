@@ -29,6 +29,12 @@ if [ "$BUNDLE" = true ]; then
   "$HERE/../boxctl/build-standalone.sh"
   mkdir -p "$APP/Contents/Helpers"
   ditto "$XPRA_SOURCE" "$APP/Contents/Helpers/Xpra.app"
+  # Xpra is the transport for remote windows, not a separate user-facing Mac
+  # application. Agent mode prevents one duplicate Dock tile per launched app.
+  /usr/libexec/PlistBuddy -c 'Delete :LSUIElement' \
+    "$APP/Contents/Helpers/Xpra.app/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c 'Add :LSUIElement bool true' \
+    "$APP/Contents/Helpers/Xpra.app/Contents/Info.plist"
   # Xpra 6.5's Darwin backend does not declare a logical cursor canvas. GTK
   # consequently treats Retina backing pixels as points and doubles I-beams and
   # other cursors. Patch only our copied bundle, preserving dynamic cursor types.
