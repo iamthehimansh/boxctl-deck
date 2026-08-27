@@ -13,6 +13,24 @@ BoxDeck drives boxctl — one tunnel keeper, one source of truth.
 
 ## Install
 
+On a new Apple-silicon Mac, the release bundle includes Xpra, cloudflared, and
+boxctl. This single command installs the app, prompts for the box address and
+one-time TOTP login, enrolls the SSH-only boxserver, and opens BoxDeck:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iamthehimansh/boxctl-deck/main/install.sh | bash
+```
+
+For this box, the address can be supplied in the same command, leaving only the
+password and TOTP authentication prompts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iamthehimansh/boxctl-deck/main/install.sh | \
+  bash -s -- --host ssh.himansh.in --user himansh-raj
+```
+
+For development from a checkout:
+
 ```bash
 # CLI
 cd boxctl && uv venv .venv && uv pip install --python .venv/bin/python pexpect
@@ -67,6 +85,13 @@ boxctl gui launch xterm
 - **Remote apps, not a remote desktop.** Xpra creates one seamless session per
   launched app over the existing SSH alias. No listening port is exposed, and
   its SSH client is forced to the silent session key so it cannot prompt Secretive.
+- **Portable boxserver.** `boxctl server install` places a small standard-library
+  command in `~/.local/bin` on the box. It publishes the machine profile and app
+  catalog only to authenticated SSH clients; it is not a daemon and opens no port.
+- **Full seamless integration.** Remote apps enable bidirectional clipboard,
+  speakers, microphone, notifications, tray icons, video encoding and client
+  OpenGL. A fixed 96 logical DPI and 1:1 scaling keep app sizing correct; remote
+  cursor bitmaps are disabled to avoid Xpra's oversized Retina text cursor.
 - **The menu-bar chart is an `NSView`, not an `NSImage`.** `MenuBarExtra` labels
   can't render `Canvas`, and `NSImage` + `lockFocus` draws at 1× and looks fuzzy
   on Retina.

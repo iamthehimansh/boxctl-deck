@@ -21,7 +21,8 @@ enum Shell {
                 // behaves identically whether opened from Terminal or at login.
                 var environment = ProcessInfo.processInfo.environment
                 let home = FileManager.default.homeDirectoryForCurrentUser.path
-                let required = ["\(home)/.local/bin", "/opt/homebrew/bin",
+                let helpers = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers").path
+                let required = [helpers, "\(home)/.local/bin", "/opt/homebrew/bin",
                                 "/opt/homebrew/sbin", "/usr/local/bin",
                                 "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
                 let inherited = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
@@ -236,8 +237,11 @@ final class BoxModel: ObservableObject {
     /// Tear the keeper down with the app — "attached to this app only".
     func appWillQuit() {
         let p = Process()
-        let boxctl = FileManager.default.homeDirectoryForCurrentUser
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/boxctl").path
+        let installed = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/bin/boxctl").path
+        let boxctl = FileManager.default.isExecutableFile(atPath: bundled) ? bundled : installed
         p.executableURL = URL(fileURLWithPath: boxctl)
         p.arguments = ["tunnel", "stop"]
         try? p.run()
@@ -486,23 +490,26 @@ final class BoxModel: ObservableObject {
         note("loaded \(decoded.count) GUI applications")
     }
 
-    func launch(_ app: RemoteApp) async {
+    func launch(_ app: RemoteApp, microphone: Bool = false) async {
         note("GUI → \(app.name)")
-        let r = await Shell.run(["boxctl", "gui", "launch", "--desktop", Shell.q(app.id)], timeout: 45)
+        var args = ["boxctl", "gui", "launch", "--desktop", Shell.q(app.id)]
+        if microphone { args.append("--microphone") }
+        let r = await Shell.run(args, timeout: 45)
         let clean = (r.out + r.err).replacingOccurrences(
             of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
         banner = clean.split(separator: "\n").last.map(String.init)
         if r.code == 3 { guiReady = false }
     }
 
-    func launchGUICommand(_ command: String) async {
+    func launchGUICommand(_ command: String, microphone: Bool = false) async {
         let value = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         note("GUI command → \(value)")
         let encoded = Data(value.utf8).base64EncodedString()
         // Decode locally inside zsh so arbitrary command punctuation stays one
         // argument to boxctl rather than being interpreted on the Mac.
-        let shell = "boxctl gui launch \"$(printf %s \(Shell.q(encoded)) | base64 -D)\""
+        let mic = microphone ? " --microphone" : ""
+        let shell = "boxctl gui launch\(mic) \"$(printf %s \(Shell.q(encoded)) | base64 -D)\""
         let r = await Shell.run([shell], timeout: 45)
         let clean = (r.out + r.err).replacingOccurrences(
             of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)

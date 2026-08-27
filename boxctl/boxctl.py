@@ -22,6 +22,7 @@ Commands
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import json
 import os
@@ -32,7 +33,6 @@ import socket
 import subprocess
 import sys
 import time
-import base64
 
 # Site config: env var > ~/.config/boxctl/config.json > placeholder.
 # Keeping the real host/user OUT of the source means this repo can be public.
@@ -47,7 +47,10 @@ _C = _cfg()
 HOST = os.environ.get("BOX_HOST") or _C.get("host", "box.example.com")
 USER = os.environ.get("BOX_USER") or _C.get("user", "youruser")
 ALIAS = os.environ.get("BOX_ALIAS") or _C.get("alias", "box")
-CLOUDFLARED = shutil.which("cloudflared") or "/opt/homebrew/bin/cloudflared"
+_HELPERS = pathlib.Path(sys.executable).resolve().parent
+CLOUDFLARED = (os.environ.get("BOX_CLOUDFLARED") or shutil.which("cloudflared") or
+                (str(_HELPERS / "cloudflared") if (_HELPERS / "cloudflared").exists()
+                 else "/opt/homebrew/bin/cloudflared"))
 CFG_DIR = pathlib.Path(os.path.expanduser("~/.config/boxctl"))
 KEY = CFG_DIR / "session_key"
 META = CFG_DIR / "session.json"
@@ -695,12 +698,19 @@ def xpra_binary() -> str | None:
     """Find the native macOS Xpra client installed by its PKG/DMG or Homebrew."""
     # The Homebrew symlink cannot find its adjacent Contents/Resources bundle;
     # invoke the application executable by its real path on macOS.
-    candidates = ["/Applications/Xpra.app/Contents/MacOS/Xpra", shutil.which("xpra")]
+    bundled = _HELPERS / "Xpra.app/Contents/MacOS/Xpra"
+    candidates = [str(bundled), "/Applications/Xpra.app/Contents/MacOS/Xpra",
+                  shutil.which("xpra")]
     return next((p for p in candidates if p and pathlib.Path(p).exists()), None)
 
 
 def gui_apps() -> tuple[int, str]:
     """Return launchable freedesktop entries as JSON without executing them."""
+    server = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+                  "~/.local/bin/boxserver apps"], timeout=45)
+    if server.returncode == 0 and server.stdout.lstrip().startswith("["):
+        return 0, server.stdout
+    # Compatibility fallback for boxes not enrolled with boxserver yet.
     script = r'''
 import configparser, glob, json, os
 roots = ["/usr/share/applications", os.path.expanduser("~/.local/share/applications")]
@@ -750,7 +760,7 @@ raise SystemExit(2)
     return r.returncode, r.stdout.strip() if r.returncode == 0 else (r.stderr.strip() or "application not found")
 
 
-def gui_launch(command: str, label: str = "application") -> int:
+def gui_launch(command: str, label: str = "application", microphone: bool = False) -> int:
     client = xpra_binary()
     if not client:
         print(f"{bad} Xpra client is not installed on this Mac")
@@ -769,7 +779,17 @@ def gui_launch(command: str, label: str = "application") -> int:
     args = [client, "seamless", f"ssh://{ALIAS}/",
             "--ssh=ssh -o BatchMode=yes -o IdentityAgent=none",
             f"--start-child={command}", "--exit-with-children=yes",
-            "--speaker=off", "--microphone=off"]
+            # Explicit integration settings make packaged clients deterministic.
+            "--speaker=on", f"--microphone={'on' if microphone else 'off'}", "--av-sync=yes",
+            "--clipboard=yes", "--clipboard-direction=both",
+            # Xpra 6.5 on Retina doubles some Linux cursor bitmaps (notably the
+            # text I-beam). Keep macOS's normal local pointer until upstream's
+            # Darwin cursor-size implementation reports a fixed logical size.
+            "--notifications=yes", "--system-tray=yes", "--cursors=no",
+            "--video=yes", "--opengl=auto",
+            # A 1:1 virtual desktop and fixed logical DPI prevent Retina scaling
+            # from multiplying cursor sizes in some GTK/Electron applications.
+            "--desktop-scaling=1", "--dpi=96"]
     log = CFG_DIR / "xpra-client.log"
     log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     stream = open(log, "ab", buffering=0)
@@ -792,12 +812,115 @@ def cmd_gui(args) -> int:
     if args.desktop:
         code, command = desktop_command(args.desktop)
         if code: print(f"{bad} {command}"); return code
-        return gui_launch(command, args.desktop.removesuffix(".desktop"))
+        return gui_launch(command, args.desktop.removesuffix(".desktop"), args.microphone)
     command = " ".join(args.command or []).strip()
     if not command:
         print(f"{bad} provide --desktop ID or a command")
         return 2
-    return gui_launch(command, command)
+    return gui_launch(command, command, args.microphone)
+
+
+# ---------------------------------------------------------------- portable box profile
+BOXSERVER = r'''#!/usr/bin/env python3
+"""boxserver: the SSH-only BoxDeck endpoint (no daemon and no listening port)."""
+import argparse, glob, json, os, platform, shutil
+from pathlib import Path
+
+PROFILE = Path.home() / ".config/boxserver/profile.json"
+
+def profile():
+    try: data = json.loads(PROFILE.read_text())
+    except Exception: data = {}
+    data.update({"server_version": 2, "hostname": platform.node(),
+                 "home": str(Path.home()), "user": os.environ.get("USER", ""),
+                 "features": {"xpra": bool(shutil.which("xpra")),
+                              "nvidia": bool(shutil.which("nvidia-smi")),
+                              "audio": bool(shutil.which("pactl")),
+                              "apps": True, "clipboard": True}})
+    print(json.dumps(data))
+
+def apps():
+    import configparser
+    found = {}
+    for root in ("/usr/share/applications", str(Path.home()/".local/share/applications")):
+        for path in glob.glob(root + "/*.desktop"):
+            c = configparser.ConfigParser(interpolation=None, strict=False)
+            try:
+                c.read(path, encoding="utf-8"); d = c["Desktop Entry"]
+                if d.get("Type", "Application") != "Application" or d.getboolean("NoDisplay", fallback=False) or d.getboolean("Hidden", fallback=False): continue
+                name, command = d.get("Name", "").strip(), d.get("Exec", "").strip()
+                if name and command:
+                    ident = os.path.basename(path)
+                    found[ident] = {"id": ident, "name": name, "detail": d.get("Comment", "").strip(), "icon": d.get("Icon", "").strip()}
+            except Exception: pass
+    print(json.dumps(sorted(found.values(), key=lambda x: x["name"].casefold())))
+
+p = argparse.ArgumentParser(prog="boxserver")
+p.add_argument("action", choices=("profile", "apps", "ping"))
+a = p.parse_args()
+if a.action == "profile": profile()
+elif a.action == "apps": apps()
+else: print(json.dumps({"ok": True, "server_version": 2}))
+'''
+
+
+def cmd_init(args) -> int:
+    """Write the minimum profile needed before the first TOTP authentication."""
+    CFG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cfg = {"host": args.host, "user": args.user, "alias": args.alias,
+           "lan_host": args.lan_host}
+    (CFG_DIR / "config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+    (CFG_DIR / "config.json").chmod(0o600)
+    print(f"{ok} saved profile for {args.user}@{args.host}")
+    print("   run `boxctl connect --totp --remote` next")
+    return 0
+
+
+def cmd_server(args) -> int:
+    if args.action == "install":
+        profile = {"host": HOST, "user": USER, "alias": ALIAS,
+                   "lan_host": meta().get("lan_host") or LAN_HOST_DEFAULT,
+                   "lan_name": meta().get("lan_name", ""), "profile_version": 1}
+        source = base64.b64encode(BOXSERVER.encode()).decode()
+        pdata = base64.b64encode((json.dumps(profile, indent=2) + "\n").encode()).decode()
+        cmd = ("mkdir -p ~/.local/bin ~/.config/boxserver && "
+               f"echo {source} | base64 -d > ~/.local/bin/boxserver && "
+               "chmod 755 ~/.local/bin/boxserver && "
+               f"echo {pdata} | base64 -d > ~/.config/boxserver/profile.json && "
+               "chmod 600 ~/.config/boxserver/profile.json && ~/.local/bin/boxserver ping")
+        r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                 ALIAS, cmd], timeout=45)
+        if r.returncode:
+            print(f"{bad} {(r.stderr or r.stdout).strip()[:200]}")
+            return 1
+        print(f"{ok} boxserver installed (SSH-only; no open port)")
+        return 0
+    if args.action == "sync":
+        r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                 ALIAS, "~/.local/bin/boxserver profile"], timeout=45)
+        try:
+            profile = json.loads(r.stdout)
+            required = ("host", "user", "alias", "lan_host")
+            if r.returncode or not all(profile.get(k) for k in required):
+                raise ValueError("incomplete server profile")
+        except Exception as e:
+            print(f"{bad} cannot import boxserver profile: {e}")
+            return 1
+        config = {k: profile[k] for k in required}
+        (CFG_DIR / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+        (CFG_DIR / "config.json").chmod(0o600)
+        m = meta()
+        m.update({k: profile[k] for k in ("lan_host", "lan_name") if profile.get(k)})
+        META.write_text(json.dumps(m, indent=2) + "\n"); META.chmod(0o600)
+        write_ssh_alias(identity=str(KEY) if KEY.exists() else None,
+                        agent_sock=str(SECRETIVE_SOCK) if passkey_ready() else None)
+        print(f"{ok} imported authoritative profile from {profile.get('hostname', 'boxserver')}")
+        return 0
+    remote = "~/.local/bin/boxserver " + args.action
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+             ALIAS, remote], timeout=45)
+    print(r.stdout if r.returncode == 0 else r.stderr, end="")
+    return r.returncode
 
 
 def main() -> int:
@@ -827,8 +950,19 @@ def main() -> int:
     g = sub.add_parser("gui", help="discover and launch seamless GUI applications")
     g.add_argument("action", choices=["apps", "launch", "check"])
     g.add_argument("--desktop", help="desktop entry id returned by `gui apps`")
+    g.add_argument("--microphone", action="store_true",
+                   help="share this Mac's microphone with the remote app")
     g.add_argument("command", nargs="*", help="custom GUI command")
     g.set_defaults(fn=cmd_gui)
+    i = sub.add_parser("init", help="configure a box on this Mac")
+    i.add_argument("--host", required=True)
+    i.add_argument("--user", required=True)
+    i.add_argument("--lan-host", required=True)
+    i.add_argument("--alias", default="box")
+    i.set_defaults(fn=cmd_init)
+    bs = sub.add_parser("server", help="install or query the SSH-only boxserver")
+    bs.add_argument("action", choices=["install", "sync", "profile", "apps", "ping"])
+    bs.set_defaults(fn=cmd_server)
     args = ap.parse_args()
     if not getattr(args, "fn", None):
         ap.print_help()

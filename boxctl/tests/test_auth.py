@@ -40,6 +40,9 @@ class PasskeyPolicyTests(unittest.TestCase):
 
 
 class GUIAppTests(unittest.TestCase):
+    def test_embedded_boxserver_is_valid_python(self):
+        compile(boxctl.BOXSERVER, "boxserver", "exec")
+
     def test_desktop_id_rejects_shell_metacharacters(self):
         code, message = boxctl.desktop_command("app.desktop;touch-pwned")
         self.assertEqual(code, 2)
@@ -48,10 +51,11 @@ class GUIAppTests(unittest.TestCase):
     @patch.object(boxctl, "gui_launch", return_value=0)
     def test_custom_gui_command_stays_one_command(self, launch):
         args = types.SimpleNamespace(
-            action="launch", desktop=None, command=["python", "viewer.py", "--demo"]
+            action="launch", desktop=None, microphone=False,
+            command=["python", "viewer.py", "--demo"]
         )
         self.assertEqual(boxctl.cmd_gui(args), 0)
-        launch.assert_called_once_with("python viewer.py --demo", "python viewer.py --demo")
+        launch.assert_called_once_with("python viewer.py --demo", "python viewer.py --demo", False)
 
 
 if __name__ == "__main__":

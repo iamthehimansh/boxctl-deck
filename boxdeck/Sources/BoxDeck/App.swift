@@ -99,6 +99,7 @@ struct AppDrawer: View {
     @EnvironmentObject var box: BoxModel
     @State private var search = ""
     @State private var command = ""
+    @AppStorage("guiShareMicrophone") private var shareMicrophone = false
 
     private var filtered: [RemoteApp] {
         guard !search.isEmpty else { return box.apps }
@@ -136,7 +137,7 @@ struct AppDrawer: View {
                         }
                     }
                     Spacer()
-                    Button("Launch") { Task { await box.launch(app) } }
+                    Button("Launch") { Task { await box.launch(app, microphone: shareMicrophone) } }
                         .buttonStyle(.borderedProminent).controlSize(.small)
                         .disabled(!box.guiReady)
                 }.padding(.vertical, 4)
@@ -151,14 +152,17 @@ struct AppDrawer: View {
                 Button("Run") { runCommand() }
                     .buttonStyle(.borderedProminent)
                     .disabled(command.trimmingCharacters(in: .whitespaces).isEmpty || !box.guiReady)
-            }.padding(12)
+            }.padding(.horizontal, 12).padding(.top, 10)
+            Toggle("Share this Mac’s microphone with launched apps", isOn: $shareMicrophone)
+                .font(.caption).toggleStyle(.checkbox)
+                .padding(.horizontal, 12).padding(.vertical, 8)
         }
     }
 
     private func runCommand() {
         let value = command
         command = ""
-        Task { await box.launchGUICommand(value) }
+        Task { await box.launchGUICommand(value, microphone: shareMicrophone) }
     }
 }
 

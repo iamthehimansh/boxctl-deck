@@ -1,8 +1,15 @@
 #!/bin/bash
 # Build BoxDeck.app (Command Line Tools only — no Xcode project needed).
-set -e
+set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
+INSTALL=false
+BUNDLE=false
+for arg in "$@"; do
+  [ "$arg" = "--install" ] && INSTALL=true
+  [ "$arg" = "--bundle" ] && BUNDLE=true
+done
+[ "$INSTALL" = true ] && BUNDLE=true
 echo "==> swift build (release)"
 swift build -c release
 BIN="$(swift build -c release --show-bin-path)/BoxDeck"
@@ -12,6 +19,22 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/BoxDeck"
 [ -f "$HERE/BoxDeck.icns" ] && cp "$HERE/BoxDeck.icns" "$APP/Contents/Resources/"
 for f in menubar.png "menubar@2x.png"; do [ -f "$HERE/$f" ] && cp "$HERE/$f" "$APP/Contents/Resources/"; done
+cp "$HERE/THIRD_PARTY.md" "$APP/Contents/Resources/"
+
+if [ "$BUNDLE" = true ]; then
+  XPRA_SOURCE="${BOXDECK_XPRA_APP:-/Applications/Xpra.app}"
+  CLOUDFLARED_SOURCE="${BOXDECK_CLOUDFLARED:-$(command -v cloudflared || true)}"
+  [ -d "$XPRA_SOURCE" ] || { echo "Xpra.app missing: $XPRA_SOURCE" >&2; exit 1; }
+  [ -x "$CLOUDFLARED_SOURCE" ] || { echo "cloudflared missing" >&2; exit 1; }
+  "$HERE/../boxctl/build-standalone.sh"
+  mkdir -p "$APP/Contents/Helpers"
+  ditto "$XPRA_SOURCE" "$APP/Contents/Helpers/Xpra.app"
+  cp "$HERE/../boxctl/dist/boxctl" "$APP/Contents/Helpers/boxctl"
+  cp "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CLOUDFLARED_SOURCE")" \
+     "$APP/Contents/Helpers/cloudflared"
+  chmod 755 "$APP/Contents/Helpers/boxctl" "$APP/Contents/Helpers/cloudflared"
+  echo "==> bundled Xpra, boxctl and cloudflared"
+fi
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,7 +58,7 @@ echo "Run it with:  open \"$APP\""
 # `./build.sh --install` refreshes /Applications so you never end up running two
 # copies (two copies = two menu-bar icons, and login-at-startup only works
 # reliably for an app in /Applications).
-if [ "$1" = "--install" ]; then
+if [ "$INSTALL" = true ]; then
   rm -rf /Applications/BoxDeck.app
   cp -R "$APP" /Applications/BoxDeck.app
   codesign --force --deep --sign - /Applications/BoxDeck.app 2>/dev/null || true

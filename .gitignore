@@ -1,22 +1,5 @@
-# build output
-.build/
-*.app/
-*.dmg
-*.icns
-DerivedData/
-
-# python
-.venv/
-__pycache__/
-*.pyc
-
-# generated art (rebuild with make-icon.py)
-boxdeck/icon.png
-boxdeck/menubar.png
-boxdeck/menubar@2x.png
-
-# never commit anything resembling a key/session
-*.pem
-*_key
-session*.json
 .DS_Store
+boxctl/dist/
+boxdeck/.build/
+boxdeck/BoxDeck.app/
+boxdeck/BoxDeck.dmg

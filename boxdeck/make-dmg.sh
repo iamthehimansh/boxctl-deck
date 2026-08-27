@@ -2,7 +2,7 @@
 # Build BoxDeck.app and package it as a distributable .dmg
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
-"$HERE/build.sh"
+"$HERE/build.sh" --bundle
 APP="$HERE/BoxDeck.app"
 DMG="$HERE/BoxDeck.dmg"
 STAGE="$(mktemp -d)/BoxDeck"
