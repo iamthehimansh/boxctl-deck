@@ -5,8 +5,8 @@ tunnels, services and live telemetry.
 
 | | |
 |---|---|
-| **[boxctl](boxctl/)** | CLI: auth (Touch ID / TOTP), LAN↔remote routing, tunnels, health, VS Code |
-| **[boxdeck](boxdeck/)** | macOS app: menu-bar live chart, service toggles, remote file browser |
+| **[boxctl](boxctl/)** | CLI: auth (Touch ID / TOTP), routing, tunnels, health, VS Code, seamless GUI apps |
+| **[boxdeck](boxdeck/)** | macOS app: live telemetry, services, files, and a searchable remote app drawer |
 | **[boxmcp](boxmcp/)** | MCP server: remote shell, files, services, and telemetry for Codex |
 
 BoxDeck drives boxctl — one tunnel keeper, one source of truth.
@@ -48,6 +48,9 @@ boxctl status      # route, auth, key hours, tunnels, serve health, GPU
 boxctl doctor      # diagnose + auto-fix
 boxctl connect     # renew auth (Touch ID; TOTP fallback)
 boxctl code [path] # VS Code Remote-SSH on the box
+boxctl gui apps    # JSON list of launchable apps installed on the box
+boxctl gui launch --desktop org.gnome.Calculator.desktop
+boxctl gui launch xterm
 ```
 
 ## Design notes (the non-obvious bits)
@@ -61,6 +64,9 @@ boxctl code [path] # VS Code Remote-SSH on the box
   BoxDeck delegates to `boxctl tunnel start` rather than spawning its own.
 - **One 16 GB GPU.** Services marked `gpu: true` in `~/services.json` (on the box)
   stop each other automatically.
+- **Remote apps, not a remote desktop.** Xpra creates one seamless session per
+  launched app over the existing SSH alias. No listening port is exposed, and
+  its SSH client is forced to the silent session key so it cannot prompt Secretive.
 - **The menu-bar chart is an `NSView`, not an `NSImage`.** `MenuBarExtra` labels
   can't render `Canvas`, and `NSImage` + `lockFocus` draws at 1× and looks fuzzy
   on Retina.
@@ -68,4 +74,5 @@ boxctl code [path] # VS Code Remote-SSH on the box
 ## Requirements
 
 macOS 13+, `cloudflared`, Python 3.12+ (`uv`), Command Line Tools for the app.
+Seamless GUI apps require the native Xpra client on macOS and Xpra server on the box.
 Optional: [Secretive](https://github.com/maxgoedjen/secretive) for the Touch ID key.

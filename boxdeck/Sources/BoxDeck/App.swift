@@ -63,7 +63,7 @@ struct ContentView: View {
                     ActivityLog()
                 }
                 .frame(minWidth: 300, idealWidth: 340, maxWidth: 420)
-                FileBrowser()
+                RemoteWorkspace()
                     .frame(minWidth: 480)
             }
         }
@@ -80,6 +80,85 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: box.banner)
+    }
+}
+
+struct RemoteWorkspace: View {
+    var body: some View {
+        TabView {
+            FileBrowser()
+                .tabItem { Label("Files", systemImage: "folder") }
+            AppDrawer()
+                .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
+        }
+        .padding(.top, 4)
+    }
+}
+
+struct AppDrawer: View {
+    @EnvironmentObject var box: BoxModel
+    @State private var search = ""
+    @State private var command = ""
+
+    private var filtered: [RemoteApp] {
+        guard !search.isEmpty else { return box.apps }
+        return box.apps.filter { $0.name.localizedCaseInsensitiveContains(search) ||
+            $0.detail.localizedCaseInsensitiveContains(search) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search \(box.apps.count) applications", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                if box.appsLoading { ProgressView().controlSize(.small) }
+                Button { Task { await box.loadApps() } } label: {
+                    Image(systemName: "arrow.clockwise")
+                }.help("Reload installed applications")
+            }.padding(12)
+
+            if !box.guiReady {
+                Label("Xpra must be installed on this Mac and the box before applications can open.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+                    .padding(.horizontal, 12).padding(.bottom, 8)
+            }
+            Divider()
+            List(filtered) { app in
+                HStack(spacing: 10) {
+                    Image(systemName: "app.dashed")
+                        .font(.title2).foregroundStyle(.blue).frame(width: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(app.name).fontWeight(.medium)
+                        if !app.detail.isEmpty {
+                            Text(app.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                    Spacer()
+                    Button("Launch") { Task { await box.launch(app) } }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                        .disabled(!box.guiReady)
+                }.padding(.vertical, 4)
+            }.listStyle(.inset)
+
+            Divider()
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                TextField("Run GUI command on box, e.g. gedit", text: $command)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { runCommand() }
+                Button("Run") { runCommand() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(command.trimmingCharacters(in: .whitespaces).isEmpty || !box.guiReady)
+            }.padding(12)
+        }
+    }
+
+    private func runCommand() {
+        let value = command
+        command = ""
+        Task { await box.launchGUICommand(value) }
     }
 }
 

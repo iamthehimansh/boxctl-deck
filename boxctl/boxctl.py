@@ -32,6 +32,7 @@ import socket
 import subprocess
 import sys
 import time
+import base64
 
 # Site config: env var > ~/.config/boxctl/config.json > placeholder.
 # Keeping the real host/user OUT of the source means this repo can be public.
@@ -689,6 +690,116 @@ def cmd_code(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- seamless GUI apps
+def xpra_binary() -> str | None:
+    """Find the native macOS Xpra client installed by its PKG/DMG or Homebrew."""
+    # The Homebrew symlink cannot find its adjacent Contents/Resources bundle;
+    # invoke the application executable by its real path on macOS.
+    candidates = ["/Applications/Xpra.app/Contents/MacOS/Xpra", shutil.which("xpra")]
+    return next((p for p in candidates if p and pathlib.Path(p).exists()), None)
+
+
+def gui_apps() -> tuple[int, str]:
+    """Return launchable freedesktop entries as JSON without executing them."""
+    script = r'''
+import configparser, glob, json, os
+roots = ["/usr/share/applications", os.path.expanduser("~/.local/share/applications")]
+apps = {}
+for root in roots:
+    for path in glob.glob(root + "/*.desktop"):
+        c = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            c.read(path, encoding="utf-8")
+            d = c["Desktop Entry"]
+            if d.get("Type", "Application") != "Application": continue
+            if d.getboolean("NoDisplay", fallback=False) or d.getboolean("Hidden", fallback=False): continue
+            name, command = d.get("Name", "").strip(), d.get("Exec", "").strip()
+            if not name or not command: continue
+            ident = os.path.basename(path)
+            apps[ident] = {"id": ident, "name": name,
+                "detail": d.get("Comment", "").strip(), "icon": d.get("Icon", "").strip()}
+        except Exception:
+            pass
+print(json.dumps(sorted(apps.values(), key=lambda x: x["name"].casefold())))
+'''
+    payload = base64.b64encode(script.encode()).decode()
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+             f"echo {payload} | base64 -d | python3"], timeout=45)
+    return r.returncode, r.stdout if r.returncode == 0 else r.stderr
+
+
+def desktop_command(ident: str) -> tuple[int, str]:
+    if not re.fullmatch(r"[A-Za-z0-9_.+-]+\.desktop", ident):
+        return 2, "invalid application id"
+    # Resolve on the box, remove freedesktop field codes, and print only the Exec command.
+    script = r'''
+import configparser, os, re, sys
+ident = sys.argv[1]
+for root in (os.path.expanduser("~/.local/share/applications"), "/usr/share/applications"):
+    path = os.path.join(root, ident)
+    if not os.path.isfile(path): continue
+    c = configparser.ConfigParser(interpolation=None, strict=False); c.read(path, encoding="utf-8")
+    command = c.get("Desktop Entry", "Exec", fallback="")
+    command = re.sub(r"\s*%[fFuUdDnNickvm]", "", command).replace("%%", "%").strip()
+    print(command); raise SystemExit(0 if command else 2)
+raise SystemExit(2)
+'''
+    payload = base64.b64encode(script.encode()).decode()
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+             f"echo {payload} | base64 -d | python3 - {ident}"], timeout=30)
+    return r.returncode, r.stdout.strip() if r.returncode == 0 else (r.stderr.strip() or "application not found")
+
+
+def gui_launch(command: str, label: str = "application") -> int:
+    client = xpra_binary()
+    if not client:
+        print(f"{bad} Xpra client is not installed on this Mac")
+        return 3
+    good, err = ssh_works()
+    if not good:
+        print(f"{bad} ssh not working ({err[:80]})")
+        return 1
+    check = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                 ALIAS, "command -v xpra"], timeout=25)
+    if check.returncode != 0:
+        print(f"{bad} Xpra server is not installed on the box")
+        return 3
+    # Xpra performs its own SSH connection. Force the silent session identity so
+    # launching or reconnecting GUI apps can never invoke Secretive.
+    args = [client, "seamless", f"ssh://{ALIAS}/",
+            "--ssh=ssh -o BatchMode=yes -o IdentityAgent=none",
+            f"--start-child={command}", "--exit-with-children=yes",
+            "--speaker=off", "--microphone=off"]
+    log = CFG_DIR / "xpra-client.log"
+    log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    stream = open(log, "ab", buffering=0)
+    subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                     start_new_session=True, close_fds=True)
+    print(f"{ok} launching {label}")
+    return 0
+
+
+def cmd_gui(args) -> int:
+    if args.action == "apps":
+        code, output = gui_apps(); print(output, end="" if output.endswith("\n") else "\n"); return code
+    if args.action == "check":
+        local = xpra_binary()
+        remote = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                      ALIAS, "command -v xpra"], timeout=25)
+        print(json.dumps({"client": bool(local), "server": remote.returncode == 0,
+                          "client_path": local or ""}))
+        return 0 if local and remote.returncode == 0 else 3
+    if args.desktop:
+        code, command = desktop_command(args.desktop)
+        if code: print(f"{bad} {command}"); return code
+        return gui_launch(command, args.desktop.removesuffix(".desktop"))
+    command = " ".join(args.command or []).strip()
+    if not command:
+        print(f"{bad} provide --desktop ID or a command")
+        return 2
+    return gui_launch(command, command)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="boxctl", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -713,6 +824,11 @@ def main() -> int:
     rt.add_argument("action", nargs="?", default="show", choices=["show", "detect"])
     rt.set_defaults(fn=cmd_route)
     k = sub.add_parser("code"); k.add_argument("path", nargs="?"); k.set_defaults(fn=cmd_code)
+    g = sub.add_parser("gui", help="discover and launch seamless GUI applications")
+    g.add_argument("action", choices=["apps", "launch", "check"])
+    g.add_argument("--desktop", help="desktop entry id returned by `gui apps`")
+    g.add_argument("command", nargs="*", help="custom GUI command")
+    g.set_defaults(fn=cmd_gui)
     args = ap.parse_args()
     if not getattr(args, "fn", None):
         ap.print_help()

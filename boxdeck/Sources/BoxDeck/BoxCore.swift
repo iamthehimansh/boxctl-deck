@@ -76,6 +76,13 @@ struct RemoteFile: Identifiable, Hashable {
     }
 }
 
+struct RemoteApp: Identifiable, Hashable, Codable {
+    let id: String
+    let name: String
+    let detail: String
+    let icon: String
+}
+
 struct BoxService: Identifiable, Hashable, Codable {
     let id: String            // systemd unit name (the `unit` key in services.json)
     var label: String         // shown in the UI
@@ -116,6 +123,9 @@ final class BoxModel: ObservableObject {
     @Published var cwd = NSHomeDirectoryOnBox      // resolved on first listing
     @Published var entries: [RemoteFile] = []
     @Published var selected: RemoteFile?
+    @Published var apps: [RemoteApp] = []
+    @Published var appsLoading = false
+    @Published var guiReady = false
     @Published var loading = false
     @Published var banner: String?
     @Published var log: [String] = []
@@ -167,6 +177,7 @@ final class BoxModel: ObservableObject {
             await refreshStatus()
         }
         await listDir(cwd)
+        await loadApps()
         launchAtLogin = LoginItem.isEnabled
         startPolling()
     }
@@ -454,6 +465,49 @@ final class BoxModel: ObservableObject {
         note("VS Code → \(path)")
         let r = await Shell.run(["boxctl", "code", Shell.q(path)], timeout: 45)
         if r.code != 0 { banner = "VS Code: \(r.err.prefix(120))" }
+    }
+
+    // ---- seamless GUI applications -------------------------------------
+
+    func loadApps() async {
+        appsLoading = true
+        defer { appsLoading = false }
+        async let check = Shell.run(["boxctl", "gui", "check"], timeout: 35)
+        async let listing = Shell.run(["boxctl", "gui", "apps"], timeout: 60)
+        let (ready, result) = await (check, listing)
+        guiReady = ready.code == 0
+        guard result.code == 0, let data = result.out.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([RemoteApp].self, from: data) else {
+            note("cannot load GUI applications")
+            if result.code != 0 { banner = "Apps: \((result.err.isEmpty ? result.out : result.err).prefix(120))" }
+            return
+        }
+        apps = decoded
+        note("loaded \(decoded.count) GUI applications")
+    }
+
+    func launch(_ app: RemoteApp) async {
+        note("GUI → \(app.name)")
+        let r = await Shell.run(["boxctl", "gui", "launch", "--desktop", Shell.q(app.id)], timeout: 45)
+        let clean = (r.out + r.err).replacingOccurrences(
+            of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
+        banner = clean.split(separator: "\n").last.map(String.init)
+        if r.code == 3 { guiReady = false }
+    }
+
+    func launchGUICommand(_ command: String) async {
+        let value = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        note("GUI command → \(value)")
+        let encoded = Data(value.utf8).base64EncodedString()
+        // Decode locally inside zsh so arbitrary command punctuation stays one
+        // argument to boxctl rather than being interpreted on the Mac.
+        let shell = "boxctl gui launch \"$(printf %s \(Shell.q(encoded)) | base64 -D)\""
+        let r = await Shell.run([shell], timeout: 45)
+        let clean = (r.out + r.err).replacingOccurrences(
+            of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
+        banner = clean.split(separator: "\n").last.map(String.init)
+        if r.code == 3 { guiReady = false }
     }
 
     /// Open Terminal already ssh'd into the box at `path`.
