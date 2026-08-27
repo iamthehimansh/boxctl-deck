@@ -602,11 +602,17 @@ final class BoxModel: ObservableObject {
     /// route nests three levels of quoting (zsh -lc → osascript → Terminal) and
     /// broke on the single quotes in the remote `cd`.
     func openTerminal(at path: String) async {
+        note("preparing graphical SSH terminal")
+        let prepared = await Shell.run(["boxctl", "gui", "shell"], timeout: 50)
+        guard prepared.code == 0 else {
+            banner = "GUI terminal: \((prepared.err.isEmpty ? prepared.out : prepared.err).prefix(160))"
+            return
+        }
         let f = FileManager.default.temporaryDirectory
             .appendingPathComponent("boxdeck-\(UUID().uuidString.prefix(8)).command")
         let script = """
         #!/bin/zsh
-        exec ssh -t box "cd \(path.replacingOccurrences(of: "\"", with: "\\\"")) && exec \\$SHELL -l"
+        exec ssh -t box 'export DISPLAY=:100; export PULSE_SERVER=/run/user/$(id -u)/xpra/100/pulse/native; test -r /run/user/$(id -u)/xpra/100/dbus.env && . /run/user/$(id -u)/xpra/100/dbus.env; cd "\(path.replacingOccurrences(of: "\"", with: "\\\""))" && exec $SHELL -l'
         """
         do {
             try script.write(to: f, atomically: true, encoding: .utf8)
@@ -615,7 +621,7 @@ final class BoxModel: ObservableObject {
             banner = "terminal: \(error.localizedDescription)"
             return
         }
-        note("terminal → \(path)")
+        note("graphical SSH terminal → \(path)")
         let r = await Shell.run(["open", "-a", "Terminal", Shell.q(f.path)], timeout: 20)
         if r.code != 0 { banner = "terminal: \(r.err.prefix(120))" }
     }

@@ -819,6 +819,43 @@ def gui_launch(command: str, label: str = "application", microphone: bool = Fals
     return 0
 
 
+def prepare_gui_shell() -> int:
+    """Keep one Xpra display attached so programs started by plain SSH can draw."""
+    client = xpra_binary()
+    if not client:
+        print(f"{bad} Xpra client is not installed on this Mac")
+        return 3
+    remote = (
+        "xpra id :100 >/dev/null 2>&1 || "
+        "xpra start :100 --daemon=yes --exit-with-children=no "
+        "--exit-with-client=no --speaker=on --microphone=disabled"
+    )
+    started = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                   ALIAS, remote], timeout=40)
+    if started.returncode:
+        print(f"{bad} could not prepare graphical shell: {(started.stderr or started.stdout).strip()[:160]}")
+        return 1
+    marker = f"ssh://{ALIAS}/100"
+    processes = run(["ps", "-axo", "command="], timeout=10).stdout.splitlines()
+    attached = any("/Xpra.app/Contents/MacOS/Xpra seamless " in command
+                   and marker in command for command in processes)
+    if not attached:
+        args = [client, "seamless", marker,
+                "--ssh=ssh -o BatchMode=yes -o IdentityAgent=none",
+                "--speaker=on", "--microphone=disabled", "--av-sync=yes",
+                "--clipboard=yes", "--clipboard-direction=both",
+                # The tray keeps this windowless client alive between commands;
+                # LSUIElement hides its Dock tile in the bundled application.
+                "--notifications=yes", "--system-tray=yes", "--cursors=yes",
+                "--video=yes", "--opengl=auto", "--desktop-scaling=1", "--dpi=96"]
+        log = CFG_DIR / "xpra-shell.log"
+        stream = open(log, "ab", buffering=0)
+        subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                         start_new_session=True, close_fds=True)
+    print(f"{ok} graphical SSH environment ready on :100")
+    return 0
+
+
 def cmd_gui(args) -> int:
     if args.action == "apps":
         code, output = gui_apps(); print(output, end="" if output.endswith("\n") else "\n"); return code
@@ -842,6 +879,8 @@ def cmd_gui(args) -> int:
             except ProcessLookupError: pass
         print(f"{ok} closed {len(own)} remote app session{'s' if len(own) != 1 else ''}")
         return 0
+    if args.action == "shell":
+        return prepare_gui_shell()
     if args.desktop:
         code, command = desktop_command(args.desktop)
         if code: print(f"{bad} {command}"); return code
@@ -997,7 +1036,7 @@ def main() -> int:
     rt.set_defaults(fn=cmd_route)
     k = sub.add_parser("code"); k.add_argument("path", nargs="?"); k.set_defaults(fn=cmd_code)
     g = sub.add_parser("gui", help="discover and launch seamless GUI applications")
-    g.add_argument("action", choices=["apps", "launch", "check", "clear"])
+    g.add_argument("action", choices=["apps", "launch", "check", "clear", "shell"])
     g.add_argument("--desktop", help="desktop entry id returned by `gui apps`")
     g.add_argument("--microphone", action="store_true",
                    help="share this Mac's microphone with the remote app")
