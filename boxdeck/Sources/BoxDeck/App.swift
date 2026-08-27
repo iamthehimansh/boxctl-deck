@@ -205,13 +205,13 @@ struct StatusBar: View {
                     Label("Renew with Touch ID", systemImage: "touchid")
                 }
                 Button { showingTOTP = true } label: {
-                    Label("Password + TOTP…", systemImage: "number.square")
+                    Label("Password / TOTP…", systemImage: "number.square")
                 }
             } label: {
                 Label(box.authBusy ? "Connecting…" : "Authenticate", systemImage: "person.badge.key")
             }
             .disabled(box.authBusy)
-            .help("Renew with Touch ID or recover with password + TOTP")
+            .help("Renew with Touch ID or recover with a password and optional TOTP")
 
             Button { Task { await box.refreshAll() } } label: {
                 Image(systemName: "arrow.clockwise")
@@ -244,12 +244,12 @@ struct TOTPLoginSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Authenticate to the box", systemImage: "lock.shield")
                 .font(.headline)
-            Text("Use this if the 30-day Touch ID authorization expired. Credentials are sent directly to boxctl and are never saved.")
+            Text("Use this if the 30-day Touch ID authorization expired. TOTP is optional for servers that do not require it. Credentials are sent directly to boxctl and are never saved.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Form {
                 SecureField("SSH password", text: $password)
-                TextField("6-digit TOTP", text: $code)
+                TextField("TOTP (optional)", text: $code)
                     .textContentType(.oneTimeCode)
                 Toggle("Force public domain (outside home)", isOn: $remote)
             }
@@ -267,7 +267,7 @@ struct TOTPLoginSheet: View {
                     else { Text("Connect") }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(password.isEmpty || code.count != 6 || box.authBusy)
+                .disabled(password.isEmpty || (!code.isEmpty && code.count != 6) || box.authBusy)
             }
         }
         .padding(20)

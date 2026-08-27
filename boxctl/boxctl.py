@@ -8,7 +8,7 @@ Touch ID / Secure Enclave key so day-to-day connections need no TOTP at all.
 Auth methods
   passkey  Secure Enclave key (Secretive) — Touch ID, sliding 30-day authorization.
            Preferred once set up: nothing secret is stored on disk; use renews it.
-  totp     password + TOTP -> mints a 24h key. Always kept as the bootstrap /
+  password password plus TOTP when configured -> mints a 24h key. Kept as the bootstrap /
            recovery path (and the only way to install the passkey the first time).
 
 Commands
@@ -507,7 +507,7 @@ def cmd_status(args) -> int:
         elif days > 0:
             print(f"  auth        {ok} Touch ID {days:.1f}d left (renews on use)")
         else:
-            print(f"  auth        {bad} Touch ID EXPIRED → password + TOTP required")
+            print(f"  auth        {bad} Touch ID EXPIRED → password login required")
     if rem is None:
         print(f"  session key {warn} none minted by boxctl")
     elif rem > 0:
@@ -591,15 +591,15 @@ def cmd_connect(args) -> int:
             return 0 if good else 1
         except Exception as e:  # noqa: BLE001
             if args.touch_id:
-                print(f"{bad} Touch ID renewal failed ({e}) — use password + TOTP")
+                print(f"{bad} Touch ID renewal failed ({e}) — use password login")
                 return 1
             print(f"{warn} passkey renew failed ({e}) — falling back to TOTP")
     elif not args.totp and meta().get("passkey"):
         if args.touch_id:
-            print(f"{bad} Touch ID authorization expired — use password + TOTP")
+            print(f"{bad} Touch ID authorization expired — use password login")
             return 1
         print(f"{warn} Touch ID authorization expired or needs migration — use TOTP")
-    print(f"{B}== box auth (password + TOTP) =={X}")
+    print(f"{B}== box auth (password + optional TOTP) =={X}")
     route = HOST if args.remote else (meta().get("lan_name") or
                                       meta().get("lan_host") or LAN_HOST_DEFAULT or HOST)
     print(f"   host {USER}@{route}   ttl {TTL_HOURS}h")
@@ -607,13 +607,13 @@ def cmd_connect(args) -> int:
         try:
             credentials = json.load(sys.stdin)
             pw = str(credentials["password"])
-            code = str(credentials["totp"]).strip()
+            code = str(credentials.get("totp", "")).strip()
         except Exception as e:
             print(f"{bad} invalid credentials input: {e}")
             return 2
     else:
         pw = getpass.getpass("   password: ")
-        code = input("   TOTP code: ").strip()
+        code = input("   TOTP code (optional; press Enter if disabled): ").strip()
     try:
         print("   authenticating…")
         msg = mint_session_key(pw, code, force_remote=args.remote)
@@ -930,7 +930,7 @@ def main() -> int:
     s.add_argument("--quick", action="store_true", help="skip service and GPU probes")
     s.set_defaults(fn=cmd_status)
     c = sub.add_parser("connect"); c.add_argument("--totp", action="store_true",
-                                                  help="force password+TOTP")
+                                                  help="force password login (TOTP if configured)")
     c.add_argument("--remote", action="store_true",
                    help="bootstrap through cloudflared even when LAN is reachable")
     c.add_argument("--touch-id", action="store_true",

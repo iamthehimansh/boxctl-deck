@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import io
 import types
 import unittest
 from unittest.mock import patch
@@ -37,6 +38,17 @@ class PasskeyPolicyTests(unittest.TestCase):
             totp=False, touch_id=True, remote=False, stdin_json=False
         )
         self.assertEqual(boxctl.cmd_connect(args), 1)
+
+    @patch.object(boxctl, "ssh_works", return_value=(True, ""))
+    @patch.object(boxctl, "mint_session_key", return_value="installed")
+    @patch.object(boxctl, "meta", return_value={})
+    def test_password_only_json_login_does_not_require_totp(self, _meta, mint, _ssh):
+        args = types.SimpleNamespace(
+            totp=True, touch_id=False, remote=True, stdin_json=True
+        )
+        with patch("sys.stdin", io.StringIO('{"password":"secret"}')):
+            self.assertEqual(boxctl.cmd_connect(args), 0)
+        mint.assert_called_once_with("secret", "", force_remote=True)
 
 
 class GUIAppTests(unittest.TestCase):

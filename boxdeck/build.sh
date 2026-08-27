@@ -61,7 +61,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>LSUIElement</key><false/>
 </dict></plist>
 PLIST
-codesign --force --deep --sign - "$APP" 2>/dev/null || true
+# Do not use --deep here: it rewrites Xpra's nested GStreamer/Python binaries
+# and breaks audio/plugin loading. Keep the upstream nested app signatures.
+codesign --force --sign - "$APP" 2>/dev/null || true
 echo "==> built $APP"
 echo "Run it with:  open \"$APP\""
 
@@ -71,7 +73,7 @@ echo "Run it with:  open \"$APP\""
 if [ "$INSTALL" = true ]; then
   rm -rf /Applications/BoxDeck.app
   cp -R "$APP" /Applications/BoxDeck.app
-  codesign --force --deep --sign - /Applications/BoxDeck.app 2>/dev/null || true
+  codesign --force --sign - /Applications/BoxDeck.app 2>/dev/null || true
   echo "==> installed to /Applications/BoxDeck.app"
   # The installed copy is the only one that should remain runnable. Keeping the
   # development bundle beside the sources makes Spotlight expose two identical

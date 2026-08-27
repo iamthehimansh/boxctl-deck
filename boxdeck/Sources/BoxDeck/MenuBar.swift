@@ -286,7 +286,7 @@ struct MenuBarPanel: View {
                         Label("Renew with Touch ID", systemImage: "touchid")
                     }
                     Button { showingTOTP = true } label: {
-                        Label("Password + TOTP…", systemImage: "number.square")
+                        Label("Password / TOTP…", systemImage: "number.square")
                     }
                 } label: {
                     Label("Authenticate", systemImage: "person.badge.key")

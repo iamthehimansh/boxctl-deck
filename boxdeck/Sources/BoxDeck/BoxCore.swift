@@ -563,7 +563,7 @@ final class BoxModel: ObservableObject {
         guard !authBusy else { return false }
         authBusy = true
         defer { authBusy = false }
-        note("boxctl connect (password + TOTP)")
+        note("boxctl connect (password + optional TOTP)")
         guard let data = try? JSONSerialization.data(
             withJSONObject: ["password": password, "totp": code]),
               let payload = String(data: data, encoding: .utf8) else {
