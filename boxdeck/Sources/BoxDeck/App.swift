@@ -105,7 +105,7 @@ struct AppDrawer: View {
     @EnvironmentObject var box: BoxModel
     @State private var search = ""
     @State private var command = ""
-    @AppStorage("guiShareMicrophone") private var shareMicrophone = false
+    @AppStorage("guiShareMicrophoneV2") private var shareMicrophone = false
 
     private var filtered: [RemoteApp] {
         guard !search.isEmpty else { return box.apps }
@@ -123,6 +123,9 @@ struct AppDrawer: View {
                 Button { Task { await box.loadApps() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }.help("Reload installed applications")
+                Button { Task { await box.clearRemoteApps() } } label: {
+                    Label("Clear", systemImage: "xmark.circle")
+                }.help("Close all remote app sessions")
             }.padding(12)
 
             if !box.guiReady {
@@ -165,7 +168,7 @@ struct AppDrawer: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(command.trimmingCharacters(in: .whitespaces).isEmpty || !box.guiReady)
             }.padding(.horizontal, 12).padding(.top, 10)
-            Toggle("Share this Mac’s microphone with launched apps", isOn: $shareMicrophone)
+            Toggle("Allow remote apps to use this Mac’s microphone", isOn: $shareMicrophone)
                 .font(.caption).toggleStyle(.checkbox)
                 .padding(.horizontal, 12).padding(.vertical, 8)
         }

@@ -29,6 +29,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -797,7 +798,10 @@ def gui_launch(command: str, label: str = "application", microphone: bool = Fals
             "--ssh=ssh -o BatchMode=yes -o IdentityAgent=none",
             f"--start-child={command}", "--exit-with-children=yes",
             # Explicit integration settings make packaged clients deterministic.
-            "--speaker=on", f"--microphone={'on' if microphone else 'off'}", "--av-sync=yes",
+            "--speaker=on", f"--microphone={'on' if microphone else 'disabled'}", "--av-sync=yes",
+            # Capture the private Xpra speaker monitor only. Never select a
+            # physical microphone attached to the Linux box as speaker audio.
+            "--audio-source=pulsesrc:device=Xpra-Speaker.monitor",
             "--clipboard=yes", "--clipboard-direction=both",
             # The packaged Darwin client clamps Retina cursor pixmaps to the
             # normal logical canvas, preserving I-beam/resize/hand cursor types.
@@ -825,6 +829,19 @@ def cmd_gui(args) -> int:
         print(json.dumps({"client": bool(local), "server": remote.returncode == 0,
                           "client_path": local or ""}))
         return 0 if local and remote.returncode == 0 else 3
+    if args.action == "clear":
+        own = []
+        for line in run(["ps", "-axo", "pid=,command="], timeout=10).stdout.splitlines():
+            try: pid_text, command = line.strip().split(None, 1)
+            except ValueError: continue
+            if ("/Xpra.app/Contents/MacOS/Xpra seamless " in command
+                    and f"ssh://{ALIAS}/" in command):
+                own.append(int(pid_text))
+        for pid in own:
+            try: os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+        print(f"{ok} closed {len(own)} remote app session{'s' if len(own) != 1 else ''}")
+        return 0
     if args.desktop:
         code, command = desktop_command(args.desktop)
         if code: print(f"{bad} {command}"); return code
@@ -980,7 +997,7 @@ def main() -> int:
     rt.set_defaults(fn=cmd_route)
     k = sub.add_parser("code"); k.add_argument("path", nargs="?"); k.set_defaults(fn=cmd_code)
     g = sub.add_parser("gui", help="discover and launch seamless GUI applications")
-    g.add_argument("action", choices=["apps", "launch", "check"])
+    g.add_argument("action", choices=["apps", "launch", "check", "clear"])
     g.add_argument("--desktop", help="desktop entry id returned by `gui apps`")
     g.add_argument("--microphone", action="store_true",
                    help="share this Mac's microphone with the remote app")

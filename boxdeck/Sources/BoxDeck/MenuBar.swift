@@ -311,6 +311,9 @@ struct MenuBarPanel: View {
                 Button { Task { await box.openTerminal(at: box.cwd) } } label: {
                     Label("Terminal", systemImage: "terminal")
                 }
+                Button { Task { await box.clearRemoteApps() } } label: {
+                    Label("Clear Apps", systemImage: "xmark.circle")
+                }
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
             }

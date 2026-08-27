@@ -589,6 +589,14 @@ final class BoxModel: ObservableObject {
         if r.code == 3 { guiReady = false }
     }
 
+    func clearRemoteApps() async {
+        note("closing all remote applications")
+        let r = await Shell.run(["boxctl", "gui", "clear"], timeout: 20)
+        let clean = (r.out + r.err).replacingOccurrences(
+            of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
+        banner = clean.split(separator: "\n").last.map(String.init) ?? "Remote apps closed"
+    }
+
     /// Open Terminal already ssh'd into the box at `path`.
     /// Uses a temp `.command` file instead of `osascript -e "…do script…"`: that
     /// route nests three levels of quoting (zsh -lc → osascript → Terminal) and
