@@ -80,6 +80,12 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: box.banner)
+        .task(id: box.banner) {
+            guard let shown = box.banner else { return }
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled, box.banner == shown else { return }
+            box.banner = nil
+        }
     }
 }
 
