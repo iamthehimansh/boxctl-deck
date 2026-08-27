@@ -797,6 +797,9 @@ def gui_launch(command: str, label: str = "application", microphone: bool = Fals
     args = [client, "seamless", f"ssh://{ALIAS}/",
             "--ssh=ssh -o BatchMode=yes -o IdentityAgent=none",
             f"--start-child={command}", "--exit-with-children=yes",
+            # Each ordinary app owns its server. If its only Mac client closes,
+            # tear down the remote Xpra/PulseAudio session instead of leaking it.
+            "--exit-with-client=yes",
             # Explicit integration settings make packaged clients deterministic.
             "--speaker=on", f"--microphone={'on' if microphone else 'disabled'}", "--av-sync=yes",
             # Capture the private Xpra speaker monitor only. Never select a
@@ -877,7 +880,24 @@ def cmd_gui(args) -> int:
         for pid in own:
             try: os.kill(pid, signal.SIGTERM)
             except ProcessLookupError: pass
-        print(f"{ok} closed {len(own)} remote app session{'s' if len(own) != 1 else ''}")
+        # Also reap servers left by older clients or interrupted network links.
+        # A full /run/user tmpfs can make `xpra stop` hang, so fall back to the
+        # recorded server pid after a short timeout.
+        cleanup = r'''count=0
+for d in /run/user/$(id -u)/xpra/[0-9]*; do
+  [ -d "$d" ] || continue
+  n=${d##*/}; count=$((count+1))
+  timeout 6 xpra stop :$n >/dev/null 2>&1 || {
+    [ -r "$d/server.pid" ] && kill -TERM "$(cat "$d/server.pid")" 2>/dev/null || true
+  }
+done
+echo $count'''
+        remote = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                      ALIAS, cleanup], timeout=50)
+        try: remote_count = int(remote.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError): remote_count = 0
+        total = max(len(own), remote_count)
+        print(f"{ok} closed {total} remote app session{'s' if total != 1 else ''}")
         return 0
     if args.action == "shell":
         return prepare_gui_shell()
