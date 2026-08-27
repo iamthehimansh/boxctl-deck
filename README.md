@@ -91,7 +91,8 @@ boxctl gui launch xterm
 - **Full seamless integration.** Remote apps enable bidirectional clipboard,
   speakers, microphone, notifications, tray icons, video encoding and client
   OpenGL. A fixed 96 logical DPI and 1:1 scaling keep app sizing correct; remote
-  cursor bitmaps are disabled to avoid Xpra's oversized Retina text cursor.
+  cursor pixmaps are clamped to the normal macOS logical canvas, preserving
+  I-beam, resize and hand cursor types without Xpra's oversized Retina cursor.
 - **The menu-bar chart is an `NSView`, not an `NSImage`.** `MenuBarExtra` labels
   can't render `Canvas`, and `NSImage` + `lockFocus` draws at 1× and looks fuzzy
   on Retina.

@@ -782,10 +782,9 @@ def gui_launch(command: str, label: str = "application", microphone: bool = Fals
             # Explicit integration settings make packaged clients deterministic.
             "--speaker=on", f"--microphone={'on' if microphone else 'off'}", "--av-sync=yes",
             "--clipboard=yes", "--clipboard-direction=both",
-            # Xpra 6.5 on Retina doubles some Linux cursor bitmaps (notably the
-            # text I-beam). Keep macOS's normal local pointer until upstream's
-            # Darwin cursor-size implementation reports a fixed logical size.
-            "--notifications=yes", "--system-tray=yes", "--cursors=no",
+            # The packaged Darwin client clamps Retina cursor pixmaps to the
+            # normal logical canvas, preserving I-beam/resize/hand cursor types.
+            "--notifications=yes", "--system-tray=yes", "--cursors=yes",
             "--video=yes", "--opengl=auto",
             # A 1:1 virtual desktop and fixed logical DPI prevent Retina scaling
             # from multiplying cursor sizes in some GTK/Electron applications.

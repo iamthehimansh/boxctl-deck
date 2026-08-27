@@ -29,6 +29,16 @@ if [ "$BUNDLE" = true ]; then
   "$HERE/../boxctl/build-standalone.sh"
   mkdir -p "$APP/Contents/Helpers"
   ditto "$XPRA_SOURCE" "$APP/Contents/Helpers/Xpra.app"
+  # Xpra 6.5's Darwin backend does not declare a logical cursor canvas. GTK
+  # consequently treats Retina backing pixels as points and doubles I-beams and
+  # other cursors. Patch only our copied bundle, preserving dynamic cursor types.
+  CURSOR_GUI="$(find "$APP/Contents/Helpers/Xpra.app/Contents/Resources/lib" \
+    -path '*/xpra/platform/gui.py' -print -quit)"
+  [ -n "$CURSOR_GUI" ] || { echo "Xpra cursor backend missing" >&2; exit 1; }
+  perl -0pi -e 's/(def get_fixed_cursor_size\(\) -> tuple\[int, int\]:\n)    return -1, -1/$1    return 16, 16/' "$CURSOR_GUI"
+  grep -A1 'def get_fixed_cursor_size' "$CURSOR_GUI" | grep -q 'return 16, 16' || {
+    echo "Xpra cursor patch did not apply" >&2; exit 1;
+  }
   cp "$HERE/../boxctl/dist/boxctl" "$APP/Contents/Helpers/boxctl"
   cp "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CLOUDFLARED_SOURCE")" \
      "$APP/Contents/Helpers/cloudflared"
