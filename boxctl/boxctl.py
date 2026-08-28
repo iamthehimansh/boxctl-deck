@@ -24,10 +24,12 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import hashlib
 import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -64,6 +66,9 @@ LAN_HOST_DEFAULT = os.environ.get("BOX_LAN_HOST") or _C.get("lan_host", "")
 SECRETIVE_SOCK = pathlib.Path(os.path.expanduser(
     "~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh"))
 BEGIN, END = "# >>> boxctl managed >>>", "# <<< boxctl managed <<<"
+GUI_REGISTRY = CFG_DIR / "gui-sessions.json"
+GUI_LOG_LIMIT = 1_000_000
+REMOTE_GUI_STATE = ".local/state/boxdeck/xpra"
 
 G, R, Y, B, X = "\033[32m", "\033[31m", "\033[33m", "\033[34m", "\033[0m"
 ok, bad, warn = f"{G}✓{X}", f"{R}✗{X}", f"{Y}!{X}"
@@ -72,6 +77,28 @@ ok, bad, warn = f"{G}✓{X}", f"{R}✗{X}", f"{Y}!{X}"
 # ---------------------------------------------------------------- helpers
 def run(cmd, timeout=25, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+
+
+def rotate_log(path: pathlib.Path, limit: int = GUI_LOG_LIMIT, backups: int = 2) -> None:
+    """Bound a log without unlinking a file that a live helper may still hold."""
+    try:
+        if path.stat().st_size <= limit:
+            return
+    except FileNotFoundError:
+        return
+    for n in range(backups, 0, -1):
+        old = path.with_name(path.name + f".{n}")
+        newer = path.with_name(path.name + f".{n + 1}")
+        if old.exists():
+            if n == backups:
+                old.unlink()
+            else:
+                old.replace(newer)
+    # Copy the useful tail, then truncate the original inode in case it is open.
+    tail = path.read_bytes()[-limit:]
+    path.with_name(path.name + ".1").write_bytes(tail)
+    with path.open("r+b") as stream:
+        stream.truncate(0)
 
 
 def meta() -> dict:
@@ -778,6 +805,204 @@ raise SystemExit(2)
     return r.returncode, r.stdout.strip() if r.returncode == 0 else (r.stderr.strip() or "application not found")
 
 
+def _gui_registry() -> dict:
+    try:
+        return json.loads(GUI_REGISTRY.read_text())
+    except Exception:
+        return {}
+
+
+def _save_gui_registry(value: dict) -> None:
+    CFG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    GUI_REGISTRY.write_text(json.dumps(value, indent=2) + "\n")
+    GUI_REGISTRY.chmod(0o600)
+
+
+def _pid_command(pid: int) -> str:
+    result = run(["ps", "-p", str(pid), "-o", "command="], timeout=5)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def is_recorded_orphan_helper(pid: int, recorded_pids: list[int], command: str) -> bool:
+    """Ownership guard used by cleanup: pid record plus an Xpra audio command."""
+    return (pid in recorded_pids and "xpra" in command
+            and ("_audio_meter" in command or "_audio_" in command))
+
+
+def _remote_state_path() -> str:
+    result = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                  ALIAS, "printf %s \"$HOME\""], timeout=15)
+    if result.returncode or not result.stdout.startswith("/"):
+        raise RuntimeError("could not resolve the box home directory")
+    return result.stdout.strip() + "/" + REMOTE_GUI_STATE
+
+
+REMOTE_GUI_CLEANER = r'''import json, os, shutil, signal, stat, sys, time
+from pathlib import Path
+state = Path(sys.argv[1]); mode = sys.argv[2]
+sessions = state / "owned"; sessions.mkdir(parents=True, exist_ok=True)
+
+def cmdline(pid):
+    try: return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except OSError: return ""
+
+def children(root):
+    parents = {}
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit(): continue
+        try:
+            bits = (proc / "stat").read_text().split()
+            parents[int(proc.name)] = int(bits[3])
+        except (OSError, ValueError, IndexError): pass
+    found, todo = [], [root]
+    while todo:
+        parent = todo.pop()
+        for pid, ppid in list(parents.items()):
+            if ppid == parent and pid not in found:
+                found.append(pid); todo.append(pid)
+    return found
+
+removed=[]; active=[]
+for record in sessions.glob("*.json"):
+    try: data=json.loads(record.read_text()); pid=int(data["server_pid"]); marker=data["session_id"]
+    except Exception:
+        record.unlink(missing_ok=True); continue
+    owned = f"BOXDECK_SESSION_ID={marker}" in cmdline(pid)
+    display = str(data.get("display", ""))
+    sockets = [state / "sessions" / display / "socket"]
+    runtime_xpra = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "xpra"
+    sockets += list(runtime_xpra.glob(f"*-{display}"))
+    live = owned and any(p.exists() and stat.S_ISSOCK(p.stat().st_mode) for p in sockets)
+    if live and mode != "all":
+        helpers = children(pid)
+        data["helper_pids"] = helpers
+        data["helpers"] = {str(p): cmdline(p) for p in helpers if cmdline(p)}
+        record.write_text(json.dumps(data))
+        active.append(data.get("app", marker)); continue
+    if owned:
+        pids = children(pid) + [pid]
+        for target in pids:
+            try: os.kill(target, signal.SIGTERM)
+            except ProcessLookupError: pass
+        time.sleep(.25)
+        for target in reversed(pids):
+            try: os.kill(target, 0); os.kill(target, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError): pass
+        removed.append(data.get("app", marker))
+    elif not owned:
+        # The server may have crashed and re-parented its audio meter to pid 1.
+        # Kill only helpers whose exact pids were recorded while ownership was
+        # live and whose command line is still recognizably Xpra.
+        for target in data.get("helper_pids", []):
+            command = cmdline(int(target))
+            if "xpra" in command and ("_audio_meter" in command or "_audio_" in command):
+                try: os.kill(int(target), signal.SIGTERM)
+                except ProcessLookupError: pass
+                removed.append(data.get("app", marker))
+        for target_text, expected in data.get("helpers", {}).items():
+            target = int(target_text); command = cmdline(target)
+            if command and command == expected:
+                try: os.kill(target, signal.SIGTERM)
+                except ProcessLookupError: pass
+                if data.get("app", marker) not in removed:
+                    removed.append(data.get("app", marker))
+    record.unlink(missing_ok=True)
+
+usage=shutil.disk_usage(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+print(json.dumps({"removed":removed,"active":active,"free":usage.free,"total":usage.total}))
+'''
+
+
+def remote_gui_cleanup(all_sessions: bool = False) -> dict:
+    state = _remote_state_path()
+    payload = base64.b64encode(REMOTE_GUI_CLEANER.encode()).decode()
+    mode = "all" if all_sessions else "stale"
+    result = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+                  f"echo {payload} | base64 -d | python3 - {shlex.quote(state)} {mode}"], timeout=35)
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout).strip()[:200] or "remote cleanup failed")
+    return json.loads(result.stdout)
+
+
+def gui_runtime_preflight() -> tuple[bool, str]:
+    try:
+        report = remote_gui_cleanup(False)
+    except Exception as exc:
+        return False, str(exc)
+    minimum = 64 * 1024 * 1024
+    if int(report.get("free", 0)) < minimum:
+        return False, ("box runtime directory is full after stale-session cleanup "
+                       f"({int(report.get('free', 0)) // 1048576} MiB free)")
+    return True, ""
+
+
+def _app_key(label: str, command: str) -> str:
+    return hashlib.sha256((label + "\0" + command).encode()).hexdigest()[:16]
+
+
+def _remote_start_app(command: str, label: str, key: str, microphone: bool) -> dict:
+    state = _remote_state_path()
+    session_id = f"{key}-{int(time.time())}"
+    display = 200 + int(key[:8], 16) % 700
+    script_data = base64.b64encode(("#!/bin/sh\nexec " + command + "\n").encode()).decode()
+    # Probe forward in the unlikely event that another X server owns this display.
+    for _ in range(20):
+        probe = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                     ALIAS, f"timeout 3 xpra id :{display} >/dev/null 2>&1"], timeout=6)
+        if probe.returncode != 0:
+            break
+        display += 1
+    else:
+        raise RuntimeError("no free BoxDeck Xpra display")
+    app_script = f"{state}/commands/{session_id}.sh"
+    pidfile = f"{state}/pids/{session_id}.pid"
+    logfile = f"{state}/logs/{session_id}.log"
+    owned = f"{state}/owned/{session_id}.json"
+    mic = "on" if microphone else "disabled"
+    start = (
+        f"mkdir -p {shlex.quote(state)}/{{commands,pids,owned,sessions,logs}} && "
+        f"echo {script_data} | base64 -d > {shlex.quote(app_script)} && chmod 700 {shlex.quote(app_script)} && "
+        f"xpra start :{display} --daemon=yes --splash=no --start-child={shlex.quote(app_script)} "
+        f"--exit-with-children=yes --exit-with-client=yes --speaker=on --microphone={mic} "
+        f"--audio-source=pulsesrc:device=Xpra-Speaker.monitor "
+        f"--sessions-dir={shlex.quote(state + '/sessions')} --log-dir={shlex.quote(state + '/logs')} "
+        f"--log-file={shlex.quote(logfile)} --pidfile={shlex.quote(pidfile)} "
+        f"--env=BOXDECK_SESSION_ID={session_id} && "
+        f"test -s {shlex.quote(pidfile)} && "
+        # Truncate the same inode so an open helper cannot retain deleted data.
+        f"nohup sh -c 'while kill -0 $(cat {shlex.quote(pidfile)}) 2>/dev/null; do "
+        f"sleep 5; [ $(wc -c < {shlex.quote(logfile)} 2>/dev/null || echo 0) -le 1000000 ] || "
+        f"truncate -s 0 {shlex.quote(logfile)}; done' >/dev/null 2>&1 &"
+    )
+    result = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS, start], timeout=35)
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout).strip()[-500:] or "Xpra server did not start")
+    pid_result = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+                      f"cat {shlex.quote(pidfile)}"], timeout=8)
+    server_pid = int(pid_result.stdout.strip())
+    record = {"session_id": session_id, "app": label, "key": key, "display": display,
+              "server_pid": server_pid, "logfile": logfile, "created": time.time()}
+    encoded = base64.b64encode((json.dumps(record) + "\n").encode()).decode()
+    saved = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+                 f"echo {encoded} | base64 -d > {shlex.quote(owned)}"], timeout=8)
+    if saved.returncode:
+        run(["ssh", ALIAS, f"xpra stop :{display}"], timeout=10)
+        raise RuntimeError("could not record BoxDeck session ownership")
+    time.sleep(1)
+    try: remote_gui_cleanup(False)  # capture audio/app helper pids while ownership is live
+    except Exception: pass
+    return record
+
+
+def _stop_remote_record(record: dict) -> None:
+    try:
+        run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+             f"timeout 8 xpra stop :{int(record['display'])} >/dev/null 2>&1 || true"], timeout=15)
+        remote_gui_cleanup(False)
+    except Exception:
+        pass
+
+
 def gui_launch(command: str, label: str = "application", microphone: bool = False) -> int:
     client = xpra_binary()
     if not client:
@@ -792,14 +1017,30 @@ def gui_launch(command: str, label: str = "application", microphone: bool = Fals
     if check.returncode != 0:
         print(f"{bad} Xpra server is not installed on the box")
         return 3
-    # Xpra performs its own SSH connection. Force the silent session identity so
-    # launching or reconnecting GUI apps can never invoke Secretive.
-    args = [client, "seamless", f"ssh://{ALIAS}/",
+    ready, reason = gui_runtime_preflight()
+    if not ready:
+        print(f"{bad} cannot launch {label}: {reason}")
+        return 1
+    key = _app_key(label, command)
+    registry = _gui_registry()
+    existing = registry.get(key, {})
+    existing_pid = int(existing.get("client_pid", 0) or 0)
+    if existing_pid and f"ssh://{ALIAS}/{existing.get('display')}" in _pid_command(existing_pid):
+        live = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+                    f"timeout 4 xpra id :{int(existing.get('display', 0))} >/dev/null 2>&1"], timeout=7)
+        if live.returncode == 0:
+            print(f"{ok} {label} is already running")
+            return 0
+        try: os.kill(existing_pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+    registry.pop(key, None)
+    try:
+        record = _remote_start_app(command, label, key, microphone)
+    except Exception as exc:
+        print(f"{bad} cannot start {label}: {exc}")
+        return 1
+    args = [client, "seamless", f"ssh://{ALIAS}/{record['display']}",
             "--ssh=ssh -o BatchMode=yes -o IdentityAgent=none",
-            f"--start-child={command}", "--exit-with-children=yes",
-            # Each ordinary app owns its server. If its only Mac client closes,
-            # tear down the remote Xpra/PulseAudio session instead of leaking it.
-            "--exit-with-client=yes",
             # Explicit integration settings make packaged clients deterministic.
             "--speaker=on", f"--microphone={'on' if microphone else 'disabled'}", "--av-sync=yes",
             # Capture the private Xpra speaker monitor only. Never select a
@@ -808,18 +1049,86 @@ def gui_launch(command: str, label: str = "application", microphone: bool = Fals
             "--clipboard=yes", "--clipboard-direction=both",
             # The packaged Darwin client clamps Retina cursor pixmaps to the
             # normal logical canvas, preserving I-beam/resize/hand cursor types.
-            "--notifications=yes", "--system-tray=yes", "--cursors=yes",
+            "--notifications=yes", "--system-tray=yes", "--cursors=yes", "--splash=no",
             "--video=yes", "--opengl=auto",
             # A 1:1 virtual desktop and fixed logical DPI prevent Retina scaling
             # from multiplying cursor sizes in some GTK/Electron applications.
             "--desktop-scaling=1", "--dpi=96"]
-    log = CFG_DIR / "xpra-client.log"
+    if os.environ.get("BOXCTL_GUI_HEADLESS") == "1":
+        # CI/diagnostic mode attaches from a second remote Xvfb. This supplies
+        # the monitor handshake GUI toolkits need without creating or activating
+        # any macOS window, then tears both displays down.
+        probe_display = 1000 + int(record["display"])
+        probe_cmd = (
+            f"setsid sh -c 'Xvfb :{probe_display} -screen 0 1512x982x24 >/dev/null 2>&1 & "
+            f"xv=$!; trap \"kill $xv 2>/dev/null\" EXIT; sleep 1; "
+            f"DISPLAY=:{probe_display} timeout 40 xpra attach :{record['display']} "
+            "--speaker=off --microphone=disabled --clipboard=no --notifications=no "
+            "--system-tray=no --splash=no >/dev/null 2>&1' >/dev/null 2>&1 & echo $!"
+        )
+        probe = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+                     ALIAS, probe_cmd], timeout=8)
+        try: probe_pid = int(probe.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError): probe_pid = 0
+        deadline = time.monotonic() + 35
+        last = ""
+        while time.monotonic() < deadline:
+            info = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+                        f"timeout 4 xpra info :{record['display']} 2>/dev/null | "
+                        r"grep -E '^(clients=|windows\.[0-9]+\.title=)'"], timeout=7)
+            last = info.stdout.strip()
+            windows = re.search(r"^windows\.[0-9]+\.title=", info.stdout, re.MULTILINE)
+            clients = re.search(r"^clients=([1-9][0-9]*)$", info.stdout, re.MULTILINE)
+            if windows and clients:
+                _stop_remote_record(record)
+                if probe_pid:
+                    run(["ssh", ALIAS, f"kill -TERM -- -{probe_pid} 2>/dev/null || true"], timeout=5)
+                print(f"{ok} verified {label} headlessly")
+                return 0
+            time.sleep(1)
+        _stop_remote_record(record)
+        if probe_pid:
+            run(["ssh", ALIAS, f"kill -TERM -- -{probe_pid} 2>/dev/null || true"], timeout=5)
+        print(f"{bad} {label} did not create a remote window\n{last}")
+        return 1
+    log = CFG_DIR / f"xpra-{key}.log"
     log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    rotate_log(log)
+    rotate_log(CFG_DIR / "xpra-client.log")
     stream = open(log, "ab", buffering=0)
-    subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                     start_new_session=True, close_fds=True)
-    print(f"{ok} launching {label}")
-    return 0
+    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                            start_new_session=True, close_fds=True)
+    record["client_pid"] = proc.pid
+    registry[key] = record
+    _save_gui_registry(registry)
+    deadline = time.monotonic() + 35
+    last_remote = ""
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        info = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
+                    f"timeout 4 xpra info :{record['display']} 2>/dev/null | "
+                    r"grep -E '^(clients=|windows\.[0-9]+\.title=)'"], timeout=7)
+        last_remote = info.stdout.strip()
+        windows = re.search(r"^windows\.[0-9]+\.title=", info.stdout, re.MULTILINE)
+        clients = re.search(r"^clients=([1-9][0-9]*)$", info.stdout, re.MULTILINE)
+        if info.returncode == 0 and windows and clients:
+            try: remote_gui_cleanup(False)  # snapshot owned helper pids for crash cleanup
+            except Exception: pass
+            print(f"{ok} opened {label}")
+            return 0
+        time.sleep(1)
+    if proc.poll() is None:
+        proc.terminate()
+        try: proc.wait(timeout=3)
+        except subprocess.TimeoutExpired: proc.kill()
+    _stop_remote_record(record)
+    registry = _gui_registry(); registry.pop(key, None); _save_gui_registry(registry)
+    try: tail = "\n".join(log.read_text(errors="replace").splitlines()[-8:])
+    except OSError: tail = ""
+    detail = tail or last_remote or "Xpra did not create a window"
+    print(f"{bad} {label} failed to open\n{detail[-1200:]}")
+    return 1
 
 
 def prepare_gui_shell() -> int:
@@ -859,6 +1168,39 @@ def prepare_gui_shell() -> int:
     return 0
 
 
+def gui_cleanup(all_sessions: bool = False) -> tuple[int, int]:
+    """Remove only tracked BoxDeck clients and owned remote sessions."""
+    registry = _gui_registry()
+    removed_local = 0
+    kept = {}
+    for key, record in registry.items():
+        pid = int(record.get("client_pid", 0) or 0)
+        marker = f"ssh://{ALIAS}/{record.get('display')}"
+        alive = pid > 0 and marker in _pid_command(pid)
+        if alive and not all_sessions:
+            kept[key] = record
+            continue
+        if alive:
+            try: os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+            removed_local += 1
+    tracked = {int(r.get("client_pid", 0) or 0) for r in registry.values()}
+    bundled_marker = str(_HELPERS / "Xpra.app/Contents/MacOS/Xpra")
+    for line in run(["ps", "-axo", "pid=,command="], timeout=10).stdout.splitlines():
+        try: pid_text, command = line.strip().split(None, 1); pid = int(pid_text)
+        except (ValueError, IndexError): continue
+        # Legacy clients predate the registry, but their executable path proves
+        # BoxDeck ownership. RelayDesk and standalone Xpra use different paths.
+        if (pid not in tracked and command.startswith(bundled_marker + " seamless ")
+                and f"ssh://{ALIAS}/" in command):
+            try: os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+            removed_local += 1
+    _save_gui_registry(kept)
+    report = remote_gui_cleanup(all_sessions)
+    return removed_local, len(report.get("removed", []))
+
+
 def cmd_gui(args) -> int:
     if args.action == "apps":
         code, output = gui_apps(); print(output, end="" if output.endswith("\n") else "\n"); return code
@@ -869,34 +1211,13 @@ def cmd_gui(args) -> int:
         print(json.dumps({"client": bool(local), "server": remote.returncode == 0,
                           "client_path": local or ""}))
         return 0 if local and remote.returncode == 0 else 3
-    if args.action == "clear":
-        own = []
-        for line in run(["ps", "-axo", "pid=,command="], timeout=10).stdout.splitlines():
-            try: pid_text, command = line.strip().split(None, 1)
-            except ValueError: continue
-            if ("/Xpra.app/Contents/MacOS/Xpra seamless " in command
-                    and f"ssh://{ALIAS}/" in command):
-                own.append(int(pid_text))
-        for pid in own:
-            try: os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError: pass
-        # Also reap servers left by older clients or interrupted network links.
-        # A full /run/user tmpfs can make `xpra stop` hang, so fall back to the
-        # recorded server pid after a short timeout.
-        cleanup = r'''count=0
-for d in /run/user/$(id -u)/xpra/[0-9]*; do
-  [ -d "$d" ] || continue
-  n=${d##*/}; count=$((count+1))
-  timeout 6 xpra stop :$n >/dev/null 2>&1 || {
-    [ -r "$d/server.pid" ] && kill -TERM "$(cat "$d/server.pid")" 2>/dev/null || true
-  }
-done
-echo $count'''
-        remote = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
-                      ALIAS, cleanup], timeout=50)
-        try: remote_count = int(remote.stdout.strip().splitlines()[-1])
-        except (ValueError, IndexError): remote_count = 0
-        total = max(len(own), remote_count)
+    if args.action in ("clear", "cleanup"):
+        try:
+            local_count, remote_count = gui_cleanup(args.action == "clear")
+        except Exception as exc:
+            print(f"{bad} cleanup failed: {exc}")
+            return 1
+        total = max(local_count, remote_count)
         print(f"{ok} closed {total} remote app session{'s' if total != 1 else ''}")
         return 0
     if args.action == "shell":
@@ -1056,7 +1377,7 @@ def main() -> int:
     rt.set_defaults(fn=cmd_route)
     k = sub.add_parser("code"); k.add_argument("path", nargs="?"); k.set_defaults(fn=cmd_code)
     g = sub.add_parser("gui", help="discover and launch seamless GUI applications")
-    g.add_argument("action", choices=["apps", "launch", "check", "clear", "shell"])
+    g.add_argument("action", choices=["apps", "launch", "check", "clear", "cleanup", "shell"])
     g.add_argument("--desktop", help="desktop entry id returned by `gui apps`")
     g.add_argument("--microphone", action="store_true",
                    help="share this Mac's microphone with the remote app")

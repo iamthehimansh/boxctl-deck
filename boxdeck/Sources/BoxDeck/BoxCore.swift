@@ -566,7 +566,7 @@ final class BoxModel: ObservableObject {
         note("GUI → \(app.name)")
         var args = ["boxctl", "gui", "launch", "--desktop", Shell.q(app.id)]
         if microphone { args.append("--microphone") }
-        let r = await Shell.run(args, timeout: 45)
+        let r = await Shell.run(args, timeout: 70)
         let clean = (r.out + r.err).replacingOccurrences(
             of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
         banner = clean.split(separator: "\n").last.map(String.init)
@@ -582,7 +582,7 @@ final class BoxModel: ObservableObject {
         // argument to boxctl rather than being interpreted on the Mac.
         let mic = microphone ? " --microphone" : ""
         let shell = "boxctl gui launch\(mic) \"$(printf %s \(Shell.q(encoded)) | base64 -D)\""
-        let r = await Shell.run([shell], timeout: 45)
+        let r = await Shell.run([shell], timeout: 70)
         let clean = (r.out + r.err).replacingOccurrences(
             of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
         banner = clean.split(separator: "\n").last.map(String.init)

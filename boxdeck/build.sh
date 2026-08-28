@@ -69,6 +69,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 # Do not use --deep here: it rewrites Xpra's nested GStreamer/Python binaries
 # and breaks audio/plugin loading. Keep the upstream nested app signatures.
+if [ "$BUNDLE" = true ]; then
+  # We changed only Xpra's plist (agent mode) and cursor Python source. A shallow
+  # re-sign validates that nested bundle without rewriting its media binaries.
+  codesign --force --sign - "$APP/Contents/Helpers/Xpra.app" 2>/dev/null || true
+fi
 codesign --force --sign - "$APP" 2>/dev/null || true
 echo "==> built $APP"
 echo "Run it with:  open \"$APP\""

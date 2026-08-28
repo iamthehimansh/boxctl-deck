@@ -69,6 +69,8 @@ boxctl code [path] # VS Code Remote-SSH on the box
 boxctl gui apps    # JSON list of launchable apps installed on the box
 boxctl gui launch --desktop org.gnome.Calculator.desktop
 boxctl gui launch xterm
+boxctl gui cleanup # remove stale BoxDeck-owned Xpra sessions only
+boxctl gui clear   # close every active BoxDeck-owned GUI session
 ```
 
 ## Design notes (the non-obvious bits)
