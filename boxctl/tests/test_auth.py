@@ -17,6 +17,14 @@ SPEC.loader.exec_module(boxctl)
 
 
 class PasskeyPolicyTests(unittest.TestCase):
+    @patch.object(boxctl, "lan_reachable", side_effect=lambda host: host == "192.168.1.204")
+    @patch.object(boxctl.socket, "getaddrinfo", return_value=[
+        (boxctl.socket.AF_INET, boxctl.socket.SOCK_STREAM, 6, "", ("192.168.1.204", 22))
+    ])
+    @patch.object(boxctl, "meta", return_value={"lan_host": "box.local"})
+    def test_lan_route_prefers_reachable_ipv4(self, _meta, _resolve, _reachable):
+        self.assertEqual(boxctl.preferred_lan_host(), "192.168.1.204")
+
     def test_authorized_key_has_openssh_expiry(self):
         line = boxctl.passkey_authorization("ssh-ed25519 AAAATEST comment", 0)
         self.assertEqual(

@@ -143,6 +143,29 @@ def passkey_ready() -> bool:
     return SECRETIVE_SOCK.exists()
 
 
+def preferred_lan_host() -> str:
+    """Return a reachable IPv4 LAN endpoint when Bonjour also advertises IPv6.
+
+    OpenSSH may select a broken link-local AAAA record first and never retry the
+    healthy A record.  Resolve configured names ourselves and pin the reachable
+    IPv4 address in the generated alias; keep the configured name as fallback.
+    """
+    m = meta()
+    configured = [m.get("lan_host"), m.get("lan_name"), LAN_HOST_DEFAULT]
+    seen: set[str] = set()
+    for host in filter(None, configured):
+        try:
+            candidates = [item[4][0] for item in socket.getaddrinfo(
+                host, 22, socket.AF_INET, socket.SOCK_STREAM)]
+        except OSError:
+            candidates = []
+        for candidate in candidates:
+            if candidate not in seen and lan_reachable(candidate):
+                return candidate
+            seen.add(candidate)
+    return next((host for host in configured if host), "")
+
+
 def ssh_works(timeout=15) -> tuple[bool, str]:
     # Background checks must never reach Secretive and trigger Touch ID.
     r = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
@@ -182,7 +205,7 @@ def write_ssh_alias(identity: str | None = None, agent_sock: str | None = None) 
     m = meta()
     # Prefer the mDNS/Bonjour name (avahi runs on the box): it keeps working when
     # DHCP moves the box to a new IP, and resolves in ~10ms on the LAN.
-    lan = m.get("lan_name") or m.get("lan_host") or LAN_HOST_DEFAULT
+    lan = preferred_lan_host()
     proxy = f"{CLOUDFLARED} access ssh --hostname {HOST}"
     lines = [BEGIN,
              "# `box` picks the LAN automatically when reachable, else the domain.",
@@ -281,7 +304,7 @@ def mint_session_key(password: str, totp: str, force_remote: bool = False) -> st
     # 2. Use native OpenSSH for keyboard-interactive auth. Paramiko is rejected
     # before authentication by some newer OpenSSH server configurations.
     # Prefer direct LAN (including Bonjour/IPv6); use cloudflared outside.
-    lan = meta().get("lan_name") or meta().get("lan_host") or LAN_HOST_DEFAULT
+    lan = preferred_lan_host()
     ssh_args = ["-o", "ControlMaster=no", "-o", "ControlPath=none",
                 "-o", "StrictHostKeyChecking=accept-new",
                 "-o", "PreferredAuthentications=keyboard-interactive,password",
@@ -512,7 +535,7 @@ def cmd_route(args) -> int:
                             agent_sock=str(SECRETIVE_SOCK) if passkey_ready() else None)
         return 0 if ip else 1
     print(f"{B}== routes =={X}")
-    lan = meta().get("lan_host") or LAN_HOST_DEFAULT
+    lan = preferred_lan_host()
     print(f"  lan     {lan}  (direct, fast — same network only)")
     print(f"  remote  {HOST}  (cloudflared — use from outside)")
     print(f"  auto    `ssh {ALIAS}` picks LAN when reachable, else remote\n")
@@ -628,8 +651,7 @@ def cmd_connect(args) -> int:
             return 1
         print(f"{warn} Touch ID authorization expired or needs migration — use TOTP")
     print(f"{B}== box auth (password + optional TOTP) =={X}")
-    route = HOST if args.remote else (meta().get("lan_name") or
-                                      meta().get("lan_host") or LAN_HOST_DEFAULT or HOST)
+    route = HOST if args.remote else (preferred_lan_host() or HOST)
     print(f"   host {USER}@{route}   ttl {TTL_HOURS}h")
     if args.stdin_json:
         try:
