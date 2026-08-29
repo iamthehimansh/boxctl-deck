@@ -527,6 +527,13 @@ final class BoxModel: ObservableObject {
         await loadGUISessions()
     }
 
+    func setScrollSensitivity(_ percent: Int) async {
+        let r = await Shell.run(["boxctl", "gui", "sensitivity", "--percent", "\(percent)"], timeout: 15)
+        banner = r.code == 0
+            ? "Remote app scrolling set to \(percent)% — detach and resume open apps"
+            : "Could not save scroll sensitivity"
+    }
+
     func toggleShortcut(_ app: RemoteApp) {
         if shortcutIDs.contains(app.id) {
             shortcutIDs.remove(app.id)

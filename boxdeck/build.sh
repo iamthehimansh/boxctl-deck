@@ -45,6 +45,16 @@ if [ "$BUNDLE" = true ]; then
   grep -A8 'def get_fixed_cursor_size' "$CURSOR_GUI" | grep -q 'return 16, 16' || {
     echo "Xpra cursor patch did not apply" >&2; exit 1;
   }
+  # Xpra forwards macOS smooth-scroll deltas at full strength, which is much
+  # faster than native Mac scrolling in many Linux GTK/Electron applications.
+  # Add a BoxDeck-only percentage scale controlled by the helper environment.
+  POINTER_GUI="$(find "$APP/Contents/Helpers/Xpra.app/Contents/Resources/lib" \
+    -path '*/xpra/client/gtk3/window/pointer.py' -print -quit)"
+  [ -n "$POINTER_GUI" ] || { echo "Xpra pointer backend missing" >&2; exit 1; }
+  perl -0pi -e 's/(SMOOTH_SCROLL_NORM = envint\([^\n]+\)\n)/$1SMOOTH_SCROLL_SCALE = envint("XPRA_SMOOTH_SCROLL_SCALE", 100)\n/; s/return value\n/return value * SMOOTH_SCROLL_SCALE \/ 100.0\n/; s/return math\.copysign\(smoothed, value\)/return math.copysign(smoothed, value) * SMOOTH_SCROLL_SCALE \/ 100.0/' "$POINTER_GUI"
+  grep -q 'SMOOTH_SCROLL_SCALE = envint' "$POINTER_GUI" || {
+    echo "Xpra scroll scale patch did not apply" >&2; exit 1;
+  }
   cp "$HERE/../boxctl/dist/boxctl" "$APP/Contents/Helpers/boxctl"
   cp "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CLOUDFLARED_SOURCE")" \
      "$APP/Contents/Helpers/cloudflared"

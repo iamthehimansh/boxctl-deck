@@ -76,6 +76,15 @@ class GUIAppTests(unittest.TestCase):
         env = boxctl.xpra_client_env()
         self.assertEqual(env["XPRA_SMOOTH_SCROLL_NORM"], "100")
         self.assertEqual(env["XPRA_MOUSE_SCROLL_SQRT_SCALE"], "0")
+        self.assertEqual(env["XPRA_SMOOTH_SCROLL_SCALE"], "25")
+
+    def test_scroll_sensitivity_is_clamped_and_saved(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(boxctl, "CFG_DIR", pathlib.Path(folder)), \
+             patch.object(boxctl, "_cfg", return_value={}):
+            self.assertEqual(boxctl.gui_scroll_sensitivity(999), 0)
+            saved = __import__("json").loads((pathlib.Path(folder) / "config.json").read_text())
+            self.assertEqual(saved["scroll_percent"], 200)
 
     def test_embedded_boxserver_is_valid_python(self):
         compile(boxctl.BOXSERVER, "boxserver", "exec")

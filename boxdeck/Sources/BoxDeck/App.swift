@@ -156,6 +156,7 @@ struct AppDrawer: View {
     @State private var search = ""
     @State private var command = ""
     @AppStorage("guiShareMicrophoneV2") private var shareMicrophone = false
+    @AppStorage("guiScrollSensitivity") private var scrollSensitivity = 25.0
 
     private var filtered: [RemoteApp] {
         guard !search.isEmpty else { return box.apps }
@@ -220,7 +221,18 @@ struct AppDrawer: View {
             }.padding(.horizontal, 12).padding(.top, 10)
             Toggle("Allow remote apps to use this Mac’s microphone", isOn: $shareMicrophone)
                 .font(.caption).toggleStyle(.checkbox)
-                .padding(.horizontal, 12).padding(.vertical, 8)
+                .padding(.horizontal, 12).padding(.top, 8)
+            HStack(spacing: 10) {
+                Image(systemName: "scroll")
+                Text("Scroll")
+                Slider(value: $scrollSensitivity, in: 5...100, step: 5)
+                Text("\(Int(scrollSensitivity))%").monospacedDigit().frame(width: 42)
+                Button("Apply") {
+                    Task { await box.setScrollSensitivity(Int(scrollSensitivity)) }
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 12).padding(.vertical, 8)
         }
     }
 

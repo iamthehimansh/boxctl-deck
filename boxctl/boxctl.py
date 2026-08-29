@@ -755,11 +755,28 @@ def xpra_binary() -> str | None:
 
 
 def xpra_client_env() -> dict[str, str]:
-    """Use linear macOS trackpad deltas instead of Xpra's amplified curve."""
+    """Use linear, Mac-like trackpad deltas at a tunable remote-app scale."""
     env = dict(os.environ)
     env["XPRA_SMOOTH_SCROLL_NORM"] = "100"
     env["XPRA_MOUSE_SCROLL_SQRT_SCALE"] = "0"
+    env["XPRA_SMOOTH_SCROLL_SCALE"] = os.environ.get(
+        "BOXCTL_SCROLL_PERCENT", str(_C.get("scroll_percent", 25)))
     return env
+
+
+def gui_scroll_sensitivity(value: int | None = None) -> int:
+    """Read or persist remote-app scroll sensitivity as a percentage."""
+    config_path = CFG_DIR / "config.json"
+    config = _cfg()
+    if value is not None:
+        value = max(5, min(200, int(value)))
+        config["scroll_percent"] = value
+        CFG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config, indent=2) + "\n")
+        config_path.chmod(0o600)
+    current = int(config.get("scroll_percent", 25))
+    print(json.dumps({"scroll_percent": current}))
+    return 0
 
 
 def gui_apps() -> tuple[int, str]:
@@ -1357,6 +1374,8 @@ def cmd_gui(args) -> int:
         except Exception as exc:
             print(f"{bad} cannot list sessions: {exc}"); return 1
         return 0
+    if args.action == "sensitivity":
+        return gui_scroll_sensitivity(args.percent)
     if args.action in ("resume", "detach", "terminate"):
         if not args.session:
             print(f"{bad} provide --session ID"); return 2
@@ -1528,9 +1547,10 @@ def main() -> int:
     rt.set_defaults(fn=cmd_route)
     k = sub.add_parser("code"); k.add_argument("path", nargs="?"); k.set_defaults(fn=cmd_code)
     g = sub.add_parser("gui", help="discover and launch seamless GUI applications")
-    g.add_argument("action", choices=["apps", "launch", "check", "sessions", "resume",
+    g.add_argument("action", choices=["apps", "launch", "check", "sessions", "sensitivity", "resume",
                                       "detach", "terminate", "clear", "cleanup", "shell"])
     g.add_argument("--session", help="BoxDeck session id returned by `gui sessions`")
+    g.add_argument("--percent", type=int, help="scroll sensitivity (5-200, default 25)")
     g.add_argument("--desktop", help="desktop entry id returned by `gui apps`")
     g.add_argument("--microphone", action="store_true",
                    help="share this Mac's microphone with the remote app")
