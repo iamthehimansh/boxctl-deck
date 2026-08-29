@@ -61,15 +61,15 @@ class PasskeyPolicyTests(unittest.TestCase):
 
 
 class GUIAppTests(unittest.TestCase):
+    @patch.object(boxctl, "_stop_local_gui_clients", return_value=1)
     @patch.object(boxctl, "_save_gui_registry")
     @patch.object(boxctl, "_gui_registry", return_value={"key": {"client_pid": 44}})
     @patch.object(boxctl, "_find_gui_session", return_value=("key", {
         "session_id": "session-1", "app": "Editor", "display": 222,
         "client_pid": 44, "attached": True}))
-    @patch.object(boxctl.os, "kill")
-    def test_detach_only_stops_local_client(self, kill, _find, _registry, save):
+    def test_detach_only_stops_local_client(self, _find, _registry, save, stop):
         self.assertEqual(boxctl.gui_detach("session-1"), 0)
-        kill.assert_called_once_with(44, boxctl.signal.SIGTERM)
+        stop.assert_called_once_with(222)
         self.assertEqual(save.call_args.args[0]["key"]["client_pid"], 0)
 
     def test_xpra_uses_linear_mac_trackpad_scrolling(self):

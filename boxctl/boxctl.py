@@ -853,6 +853,35 @@ def _pid_command(pid: int) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _stop_local_gui_clients(display: int) -> int:
+    """Close every BoxDeck Xpra client attached to one remote display.
+
+    Xpra's macOS client can leave its GTK window frozen after SIGTERM, and an
+    app restart can leave an older client outside our registry.  Match both the
+    bundled executable and exact display marker, then escalate only survivors.
+    """
+    marker = f"ssh://{ALIAS}/{int(display)}"
+    executable = str(_HELPERS / "Xpra.app/Contents/MacOS/Xpra")
+    rows = run(["ps", "-axo", "pid=,command="], timeout=10).stdout.splitlines()
+    pids = []
+    for row in rows:
+        try: pid_text, command = row.strip().split(None, 1); pid = int(pid_text)
+        except (ValueError, IndexError): continue
+        if command.startswith(executable + " seamless ") and marker in command:
+            pids.append(pid)
+    for pid in pids:
+        try: os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+    deadline = time.monotonic() + 0.75
+    while time.monotonic() < deadline and any(_pid_command(pid) for pid in pids):
+        time.sleep(0.05)
+    for pid in pids:
+        if _pid_command(pid):
+            try: os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+    return len(pids)
+
+
 def is_recorded_orphan_helper(pid: int, recorded_pids: list[int], command: str) -> bool:
     """Ownership guard used by cleanup: pid record plus an Xpra audio command."""
     return (pid in recorded_pids and "xpra" in command
@@ -1104,10 +1133,7 @@ def gui_detach(session_id: str) -> int:
     if not record:
         print(f"{bad} session is no longer running")
         return 1
-    pid = int(record.get("client_pid", 0) or 0)
-    if pid:
-        try: os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError: pass
+    _stop_local_gui_clients(int(record["display"]))
     local = _gui_registry()
     if key in local: local[key]["client_pid"] = 0
     _save_gui_registry(local)
@@ -1120,10 +1146,7 @@ def gui_terminate(session_id: str) -> int:
     if not record:
         print(f"{bad} session is no longer running")
         return 1
-    pid = int(record.get("client_pid", 0) or 0)
-    if pid:
-        try: os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError: pass
+    _stop_local_gui_clients(int(record["display"]))
     _stop_remote_record(record)
     local = _gui_registry(); local.pop(key, None); _save_gui_registry(local)
     print(f"{ok} terminated {record.get('app', 'application')}")
