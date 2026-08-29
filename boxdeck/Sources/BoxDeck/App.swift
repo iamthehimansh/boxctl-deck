@@ -96,8 +96,58 @@ struct RemoteWorkspace: View {
                 .tabItem { Label("Files", systemImage: "folder") }
             AppDrawer()
                 .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
+            RunningAppsView()
+                .tabItem { Label("Running", systemImage: "rectangle.on.rectangle") }
         }
         .padding(.top, 4)
+    }
+}
+
+struct RunningAppsView: View {
+    @EnvironmentObject var box: BoxModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Applications on the box").font(.headline)
+                Spacer()
+                Button { Task { await box.loadGUISessions() } } label: {
+                    Image(systemName: "arrow.clockwise")
+                }.help("Refresh running sessions")
+            }.padding(12)
+            Divider()
+            if box.guiSessions.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "rectangle.dashed").font(.system(size: 34))
+                    Text("No running applications").font(.headline)
+                    Text("Detached applications will remain here until you terminate them.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(box.guiSessions) { session in
+                    HStack(spacing: 10) {
+                        Image(systemName: session.attached ? "macwindow" : "desktopcomputer")
+                            .foregroundStyle(session.attached ? .green : .orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(session.app).fontWeight(.medium)
+                            Text(session.attached ? "Visible on this Mac" : "Running on box · detached")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if session.attached {
+                            Button("Detach") { Task { await box.sessionAction("detach", session) } }
+                        } else {
+                            Button("Resume") { Task { await box.sessionAction("resume", session) } }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        Button("Terminate", role: .destructive) {
+                            Task { await box.sessionAction("terminate", session) }
+                        }
+                    }.padding(.vertical, 5)
+                }.listStyle(.inset)
+            }
+        }
+        .task { await box.loadGUISessions() }
     }
 }
 

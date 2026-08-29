@@ -87,6 +87,15 @@ struct RemoteApp: Identifiable, Hashable, Codable {
     let iconData: String?
 }
 
+struct RemoteSession: Identifiable, Hashable, Codable {
+    let session_id: String
+    let app: String
+    let display: Int
+    let created: Double
+    let attached: Bool
+    var id: String { session_id }
+}
+
 struct BoxService: Identifiable, Hashable, Codable {
     let id: String            // systemd unit name (the `unit` key in services.json)
     var label: String         // shown in the UI
@@ -128,6 +137,7 @@ final class BoxModel: ObservableObject {
     @Published var entries: [RemoteFile] = []
     @Published var selected: RemoteFile?
     @Published var apps: [RemoteApp] = []
+    @Published var guiSessions: [RemoteSession] = []
     @Published var shortcutIDs = Set(UserDefaults.standard.stringArray(forKey: "remoteAppShortcuts") ?? [])
     @Published var appsLoading = false
     @Published var guiReady = false
@@ -496,6 +506,25 @@ final class BoxModel: ObservableObject {
         apps = decoded
         refreshShortcutIcons()
         note("loaded \(decoded.count) GUI applications")
+        await loadGUISessions()
+    }
+
+    func loadGUISessions() async {
+        let result = await Shell.run(["boxctl", "gui", "sessions"], timeout: 35)
+        guard result.code == 0, let data = result.out.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([RemoteSession].self, from: data) else {
+            guiSessions = []; return
+        }
+        guiSessions = decoded
+    }
+
+    func sessionAction(_ action: String, _ session: RemoteSession) async {
+        note("\(action) GUI → \(session.app)")
+        let r = await Shell.run(["boxctl", "gui", action, "--session", Shell.q(session.id)], timeout: 45)
+        let clean = (r.out + r.err).replacingOccurrences(
+            of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
+        banner = clean.split(separator: "\n").last.map(String.init)
+        await loadGUISessions()
     }
 
     func toggleShortcut(_ app: RemoteApp) {
@@ -571,6 +600,7 @@ final class BoxModel: ObservableObject {
             of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
         banner = clean.split(separator: "\n").last.map(String.init)
         if r.code == 3 { guiReady = false }
+        await loadGUISessions()
     }
 
     func launchGUICommand(_ command: String, microphone: Bool = false) async {
@@ -595,6 +625,7 @@ final class BoxModel: ObservableObject {
         let clean = (r.out + r.err).replacingOccurrences(
             of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
         banner = clean.split(separator: "\n").last.map(String.init) ?? "Remote apps closed"
+        await loadGUISessions()
     }
 
     /// Open Terminal already ssh'd into the box at `path`.
