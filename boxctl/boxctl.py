@@ -754,6 +754,14 @@ def xpra_binary() -> str | None:
     return next((p for p in candidates if p and pathlib.Path(p).exists()), None)
 
 
+def xpra_client_env() -> dict[str, str]:
+    """Use linear macOS trackpad deltas instead of Xpra's amplified curve."""
+    env = dict(os.environ)
+    env["XPRA_SMOOTH_SCROLL_NORM"] = "100"
+    env["XPRA_MOUSE_SCROLL_SQRT_SCALE"] = "0"
+    return env
+
+
 def gui_apps() -> tuple[int, str]:
     """Return launchable freedesktop entries as JSON without executing them."""
     server = run(["ssh", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", ALIAS,
@@ -1119,7 +1127,7 @@ def gui_launch(command: str, label: str = "application", microphone: bool = Fals
     rotate_log(CFG_DIR / "xpra-client.log")
     stream = open(log, "ab", buffering=0)
     proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                            start_new_session=True, close_fds=True)
+                            env=xpra_client_env(), start_new_session=True, close_fds=True)
     record["client_pid"] = proc.pid
     registry[key] = record
     _save_gui_registry(registry)
@@ -1185,7 +1193,7 @@ def prepare_gui_shell() -> int:
         log = CFG_DIR / "xpra-shell.log"
         stream = open(log, "ab", buffering=0)
         subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                         start_new_session=True, close_fds=True)
+                         env=xpra_client_env(), start_new_session=True, close_fds=True)
     print(f"{ok} graphical SSH environment ready on :100")
     return 0
 

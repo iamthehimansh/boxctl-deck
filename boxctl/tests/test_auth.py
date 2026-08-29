@@ -61,6 +61,11 @@ class PasskeyPolicyTests(unittest.TestCase):
 
 
 class GUIAppTests(unittest.TestCase):
+    def test_xpra_uses_linear_mac_trackpad_scrolling(self):
+        env = boxctl.xpra_client_env()
+        self.assertEqual(env["XPRA_SMOOTH_SCROLL_NORM"], "100")
+        self.assertEqual(env["XPRA_MOUSE_SCROLL_SQRT_SCALE"], "0")
+
     def test_embedded_boxserver_is_valid_python(self):
         compile(boxctl.BOXSERVER, "boxserver", "exec")
 
