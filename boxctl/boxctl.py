@@ -67,6 +67,7 @@ SECRETIVE_SOCK = pathlib.Path(os.path.expanduser(
     "~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh"))
 BEGIN, END = "# >>> boxctl managed >>>", "# <<< boxctl managed <<<"
 GUI_REGISTRY = CFG_DIR / "gui-sessions.json"
+FORWARDS_FILE = CFG_DIR / "forwards.json"
 GUI_LOG_LIMIT = 1_000_000
 REMOTE_GUI_STATE = ".local/state/boxdeck/xpra"
 
@@ -178,6 +179,19 @@ def port_open(p: int) -> bool:
     with socket.socket() as s:
         s.settimeout(1.5)
         return s.connect_ex(("127.0.0.1", p)) == 0
+
+
+def saved_forwards() -> list[dict]:
+    try:
+        value = json.loads(FORWARDS_FILE.read_text())
+        return value if isinstance(value, list) else []
+    except Exception:
+        return []
+
+
+def tunnel_pairs() -> list[tuple[int, int]]:
+    return TUNNELS + [(int(x["local_port"]), int(x["remote_port"]))
+                      for x in saved_forwards()]
 
 
 def serve_health() -> dict:
@@ -445,17 +459,18 @@ def tunnel_proc() -> list[str]:
 
 
 def tunnel_start() -> int:
+    pairs = tunnel_pairs()
     # Require a live KEEPER, not just an open port: an orphaned ssh child keeps
     # the port open with nothing to restart it when the link drops.
-    if all(port_open(l) for l, _ in TUNNELS) and tunnel_proc():
+    if all(port_open(l) for l, _ in pairs) and tunnel_proc():
         print(f"{ok} tunnels already up (keeper alive)")
         return 0
-    if all(port_open(l) for l, _ in TUNNELS) and not tunnel_proc():
+    if all(port_open(l) for l, _ in pairs) and not tunnel_proc():
         print(f"{warn} ports open but no keeper — adopting (restarting cleanly)")
         tunnel_stop()
         time.sleep(1)
     fwd = []
-    for lp, rp in TUNNELS:
+    for lp, rp in pairs:
         fwd += ["-L", f"{lp}:127.0.0.1:{rp}"]
     # keeper loop: reconnects on drop; stale links die in ~30s via ServerAlive
     script = (f"while :; do /usr/bin/ssh -N -o ExitOnForwardFailure=yes "
@@ -467,11 +482,45 @@ def tunnel_start() -> int:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(20):
         time.sleep(1)
-        if all(port_open(l) for l, _ in TUNNELS):
-            print(f"{ok} tunnels up: " + ", ".join(f":{l}" for l, _ in TUNNELS))
+        if all(port_open(l) for l, _ in pairs):
+            print(f"{ok} tunnels up: " + ", ".join(f":{l}" for l, _ in pairs))
             return 0
     print(f"{bad} tunnels did not come up — try `boxctl doctor`")
     return 1
+
+
+def cmd_forward(args) -> int:
+    forwards = saved_forwards()
+    if args.action == "list":
+        for item in forwards:
+            item["active"] = port_open(int(item["local_port"]))
+            item["url"] = f"http://127.0.0.1:{int(item['local_port'])}"
+        print(json.dumps(forwards))
+        return 0
+    local, remote = int(args.local_port or 0), int(args.remote_port or 0)
+    if args.action == "add":
+        if not 1024 <= local <= 65535 or not 1 <= remote <= 65535:
+            print(f"{bad} Mac port must be 1024-65535 and box port 1-65535")
+            return 2
+        reserved = {p for p, _ in TUNNELS}
+        if local in reserved or any(int(x["local_port"]) == local for x in forwards):
+            print(f"{bad} Mac port {local} is already configured")
+            return 2
+        forwards.append({"local_port": local, "remote_port": remote})
+    else:
+        before = len(forwards)
+        forwards = [x for x in forwards if int(x["local_port"]) != local]
+        if len(forwards) == before:
+            print(f"{bad} Mac port {local} is not configured")
+            return 1
+    CFG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    FORWARDS_FILE.write_text(json.dumps(forwards, indent=2) + "\n"); FORWARDS_FILE.chmod(0o600)
+    tunnel_stop(); time.sleep(.3)
+    result = tunnel_start()
+    if result == 0:
+        verb = "forwarding" if args.action == "add" else "removed"
+        print(f"{ok} {verb} 127.0.0.1:{local}" + (f" → box:{remote}" if args.action == "add" else ""))
+    return result
 
 
 def tunnel_stop() -> int:
@@ -1541,6 +1590,11 @@ def main() -> int:
     t = sub.add_parser("tunnel"); t.add_argument("action", nargs="?", default="status",
                                                  choices=["start", "stop", "status"])
     t.set_defaults(fn=cmd_tunnel)
+    pf = sub.add_parser("forward", help="manage saved box-to-Mac local port forwards")
+    pf.add_argument("action", choices=["list", "add", "remove"])
+    pf.add_argument("--local-port", type=int)
+    pf.add_argument("--remote-port", type=int)
+    pf.set_defaults(fn=cmd_forward)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
     rt = sub.add_parser("route", help="show/measure LAN vs remote routes")
     rt.add_argument("action", nargs="?", default="show", choices=["show", "detect"])

@@ -98,8 +98,65 @@ struct RemoteWorkspace: View {
                 .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
             RunningAppsView()
                 .tabItem { Label("Running", systemImage: "rectangle.on.rectangle") }
+            PortForwardsView()
+                .tabItem { Label("Ports", systemImage: "arrow.left.arrow.right") }
         }
         .padding(.top, 4)
+    }
+}
+
+struct PortForwardsView: View {
+    @EnvironmentObject var box: BoxModel
+    @State private var localPort = ""
+    @State private var remotePort = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Port forwarding").font(.headline)
+                Spacer()
+                Button { Task { await box.loadPortForwards() } } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }.padding(12)
+            Text("Forward a box service to this Mac. Example: Mac 8080 → box 8080, then open http://127.0.0.1:8080")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 10)
+            HStack {
+                TextField("Mac port", text: $localPort).textFieldStyle(.roundedBorder)
+                Image(systemName: "arrow.right")
+                TextField("Box port", text: $remotePort).textFieldStyle(.roundedBorder)
+                Button("Add") { add() }.buttonStyle(.borderedProminent)
+                    .disabled(Int(localPort) == nil || Int(remotePort) == nil)
+            }.padding(.horizontal, 12).padding(.bottom, 12)
+            Divider()
+            List(box.portForwards) { forward in
+                HStack {
+                    Circle().fill(forward.active ? .green : .red).frame(width: 8, height: 8)
+                    VStack(alignment: .leading) {
+                        Text("127.0.0.1:\(forward.local_port) → box:\(forward.remote_port)")
+                            .fontWeight(.medium)
+                        Text(forward.url).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Open") {
+                        if let url = URL(string: forward.url) { NSWorkspace.shared.open(url) }
+                    }.disabled(!forward.active)
+                    Button("Remove", role: .destructive) {
+                        Task { await box.removePortForward(forward) }
+                    }
+                }.padding(.vertical, 4)
+            }.listStyle(.inset)
+        }.task { await box.loadPortForwards() }
+    }
+
+    private func add() {
+        guard let local = Int(localPort), let remote = Int(remotePort) else { return }
+        Task {
+            if await box.addPortForward(local: local, remote: remote) {
+                localPort = ""; remotePort = ""
+            }
+        }
     }
 }
 

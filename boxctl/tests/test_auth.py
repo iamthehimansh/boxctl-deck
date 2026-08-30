@@ -48,6 +48,22 @@ class PasskeyPolicyTests(unittest.TestCase):
         )
         self.assertEqual(boxctl.cmd_connect(args), 1)
 
+
+class PortForwardTests(unittest.TestCase):
+    @patch.object(boxctl, "tunnel_start", return_value=0)
+    @patch.object(boxctl, "tunnel_stop", return_value=0)
+    def test_add_forward_is_persisted(self, _stop, _start):
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(boxctl, "CFG_DIR", pathlib.Path(folder)), \
+             patch.object(boxctl, "FORWARDS_FILE", pathlib.Path(folder) / "forwards.json"):
+            args = types.SimpleNamespace(action="add", local_port=9080, remote_port=8080)
+            self.assertEqual(boxctl.cmd_forward(args), 0)
+            self.assertEqual(boxctl.tunnel_pairs()[-1], (9080, 8080))
+
+    def test_privileged_local_port_is_rejected(self):
+        args = types.SimpleNamespace(action="add", local_port=80, remote_port=8080)
+        self.assertEqual(boxctl.cmd_forward(args), 2)
+
     @patch.object(boxctl, "ssh_works", return_value=(True, ""))
     @patch.object(boxctl, "mint_session_key", return_value="installed")
     @patch.object(boxctl, "meta", return_value={})
@@ -73,7 +89,8 @@ class GUIAppTests(unittest.TestCase):
         self.assertEqual(save.call_args.args[0]["key"]["client_pid"], 0)
 
     def test_xpra_uses_linear_mac_trackpad_scrolling(self):
-        env = boxctl.xpra_client_env()
+        with patch.object(boxctl, "_C", {"scroll_percent": 25}):
+            env = boxctl.xpra_client_env()
         self.assertEqual(env["XPRA_SMOOTH_SCROLL_NORM"], "100")
         self.assertEqual(env["XPRA_MOUSE_SCROLL_SQRT_SCALE"], "0")
         self.assertEqual(env["XPRA_SMOOTH_SCROLL_SCALE"], "25")

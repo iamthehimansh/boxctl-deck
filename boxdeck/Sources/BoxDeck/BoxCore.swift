@@ -96,6 +96,14 @@ struct RemoteSession: Identifiable, Hashable, Codable {
     var id: String { session_id }
 }
 
+struct PortForward: Identifiable, Hashable, Codable {
+    let local_port: Int
+    let remote_port: Int
+    let active: Bool
+    let url: String
+    var id: Int { local_port }
+}
+
 struct BoxService: Identifiable, Hashable, Codable {
     let id: String            // systemd unit name (the `unit` key in services.json)
     var label: String         // shown in the UI
@@ -138,6 +146,7 @@ final class BoxModel: ObservableObject {
     @Published var selected: RemoteFile?
     @Published var apps: [RemoteApp] = []
     @Published var guiSessions: [RemoteSession] = []
+    @Published var portForwards: [PortForward] = []
     @Published var shortcutIDs = Set(UserDefaults.standard.stringArray(forKey: "remoteAppShortcuts") ?? [])
     @Published var appsLoading = false
     @Published var guiReady = false
@@ -193,6 +202,7 @@ final class BoxModel: ObservableObject {
         }
         await listDir(cwd)
         await loadApps()
+        await loadPortForwards()
         launchAtLogin = LoginItem.isEnabled
         startPolling()
     }
@@ -532,6 +542,34 @@ final class BoxModel: ObservableObject {
         banner = r.code == 0
             ? "Remote app scrolling set to \(percent)% — detach and resume open apps"
             : "Could not save scroll sensitivity"
+    }
+
+    func loadPortForwards() async {
+        let r = await Shell.run(["boxctl", "forward", "list"], timeout: 15)
+        guard r.code == 0, let data = r.out.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([PortForward].self, from: data) else {
+            portForwards = []; return
+        }
+        portForwards = decoded
+    }
+
+    func addPortForward(local: Int, remote: Int) async -> Bool {
+        let r = await Shell.run(["boxctl", "forward", "add", "--local-port", "\(local)",
+                                 "--remote-port", "\(remote)"], timeout: 70)
+        let clean = (r.out + r.err).replacingOccurrences(
+            of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
+        banner = clean.split(separator: "\n").last.map(String.init)
+        await loadPortForwards()
+        return r.code == 0
+    }
+
+    func removePortForward(_ forward: PortForward) async {
+        let r = await Shell.run(["boxctl", "forward", "remove", "--local-port",
+                                 "\(forward.local_port)"], timeout: 70)
+        let clean = (r.out + r.err).replacingOccurrences(
+            of: "\u{1B}[[0-9;]*m", with: "", options: .regularExpression)
+        banner = clean.split(separator: "\n").last.map(String.init)
+        await loadPortForwards()
     }
 
     func toggleShortcut(_ app: RemoteApp) {
