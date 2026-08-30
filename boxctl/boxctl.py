@@ -462,13 +462,24 @@ def tunnel_start() -> int:
     pairs = tunnel_pairs()
     # Require a live KEEPER, not just an open port: an orphaned ssh child keeps
     # the port open with nothing to restart it when the link drops.
-    if all(port_open(l) for l, _ in pairs) and tunnel_proc():
+    keepers = tunnel_proc()
+    if all(port_open(l) for l, _ in pairs) and keepers:
         print(f"{ok} tunnels already up (keeper alive)")
         return 0
-    if all(port_open(l) for l, _ in pairs) and not tunnel_proc():
+    if all(port_open(l) for l, _ in pairs) and not keepers:
         print(f"{warn} ports open but no keeper — adopting (restarting cleanly)")
         tunnel_stop()
         time.sleep(1)
+    elif keepers:
+        # A keeper with an expired key is already retrying every three seconds.
+        # Never stack another loop on top; it will reconnect after authentication.
+        for _ in range(20):
+            time.sleep(1)
+            if all(port_open(l) for l, _ in pairs):
+                print(f"{ok} tunnels up: " + ", ".join(f":{l}" for l, _ in pairs))
+                return 0
+        print(f"{bad} tunnel keeper is waiting for authentication")
+        return 1
     fwd = []
     for lp, rp in pairs:
         fwd += ["-L", f"{lp}:127.0.0.1:{rp}"]
@@ -658,10 +669,19 @@ def renew_via_passkey() -> str:
            f"printf '%s\\n' {json.dumps(passkey_line)} >> ~/.ssh/authorized_keys && "
            "chmod 600 ~/.ssh/authorized_keys && echo INSTALLED")
     env = dict(os.environ, SSH_AUTH_SOCK=str(SECRETIVE_SOCK))
-    r = run(["ssh", "-o", "ConnectTimeout=25", "-o", f"IdentityFile={PASSKEY_PUB}",
-             "-o", "IdentitiesOnly=yes", ALIAS, cmd], timeout=120, env=env)
+    r = None
+    errors = []
+    # A LAN endpoint can be reachable at the TCP level yet reset during SSH
+    # negotiation. Fall back to cloudflared before asking for password/TOTP.
+    for target in (ALIAS, f"{ALIAS}-remote"):
+        r = run(["ssh", "-o", "ConnectTimeout=25", "-o", f"IdentityFile={PASSKEY_PUB}",
+                 "-o", "IdentitiesOnly=yes", target, cmd], timeout=120, env=env)
+        if "INSTALLED" in r.stdout:
+            break
+        errors.append((r.stderr or r.stdout).strip()[:200])
+    assert r is not None
     if "INSTALLED" not in r.stdout:
-        raise RuntimeError(f"install failed: {(r.stderr or r.stdout).strip()[:200]}")
+        raise RuntimeError(f"install failed: {'; '.join(filter(None, errors))[-400:]}")
     m = meta()
     m.update({"expires_at": session_expiry, "minted_at": time.time(),
               "ttl_hours": TTL_HOURS, "method": "passkey", "pub": pubtext,

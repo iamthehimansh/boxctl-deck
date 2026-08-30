@@ -134,7 +134,7 @@ struct PortForwardsView: View {
                 HStack {
                     Circle().fill(forward.active ? .green : .red).frame(width: 8, height: 8)
                     VStack(alignment: .leading) {
-                        Text("127.0.0.1:\(forward.local_port) → box:\(forward.remote_port)")
+                        Text(verbatim: "127.0.0.1:\(forward.local_port) → box:\(forward.remote_port)")
                             .fontWeight(.medium)
                         Text(forward.url).font(.caption).foregroundStyle(.secondary)
                     }
